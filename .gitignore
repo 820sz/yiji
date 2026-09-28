@@ -44,6 +44,10 @@ key.properties
 *.keystore
 .env
 
+# 发版时用的临时提交信息文件
+tool/commit_msg.txt
+build/yiji-*.apk
+
 # Symbolication related
 app.*.symbols
 
