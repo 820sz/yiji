@@ -87,33 +87,39 @@ class AppUpdater {
     if (apk == null) return null;
 
     final tag = (release['tag_name'] as String?) ?? '';
-    final parsed = _parseTag(tag);
-    if (parsed == null) return null;
+    final code = _parseVersionCode(tag);
+    if (code == null) return null;
     // 只有比当前新才提示。用 versionCode 而不是字符串比较:
-    // "0.10.0" 和 "0.9.0" 按字符串比会判反。
-    if (parsed.code <= currentVersionCode) return null;
+    // "0.10.0" 和 "0.9.0" 按字符串比会判反,而整数不会。
+    if (code <= currentVersionCode) return null;
+
+    // 版本名优先取 release 名字(写成"忆记 v0.4.0"这类),取不到就用 tag 本身。
+    final title = (release['name'] as String?)?.trim() ?? '';
+    final versionName = _versionNameFrom(title) ?? tag.replaceFirst(RegExp(r'^v'), '');
 
     return UpdateInfo(
-      versionName: parsed.name,
-      versionCode: parsed.code,
+      versionName: versionName,
+      versionCode: code,
       downloadUrl: (apk['browser_download_url'] as String?) ?? '',
       notes: (release['body'] as String?)?.trim() ?? '',
       sizeBytes: (apk['size'] as num?)?.toInt() ?? 0,
     );
   }
 
-  /// 解析形如 `v0.4.0+4` 的 tag。
+  /// 从 tag 里取 versionCode。
   ///
-  /// `+N` 是 Android 的 versionCode;缺了它就没法判断新旧,返回 null。
-  static ({String name, int code})? _parseTag(String tag) {
+  /// tag 约定为 `v<versionCode>`,例如 versionCode 4 就是 `v4`。
+  /// 不把版本名塞进 tag 是为了避开 URL 编码问题——`v0.4.0+4` 里的 `+`
+  /// 在下载链接里会变成 `%2B`,虽然能用,但不值得冒这个险。
+  static int? _parseVersionCode(String tag) {
     final cleaned = tag.startsWith('v') ? tag.substring(1) : tag;
-    if (cleaned.isEmpty) return null;
+    return int.tryParse(cleaned.trim());
+  }
 
-    final plus = cleaned.indexOf('+');
-    final name = plus >= 0 ? cleaned.substring(0, plus) : cleaned;
-    final code = plus >= 0 ? int.tryParse(cleaned.substring(plus + 1)) : null;
-    if (name.isEmpty || code == null) return null;
-    return (name: name, code: code);
+  /// 从 release 标题里抠出语义化版本号,如"忆记 v0.4.0" → "0.4.0"。
+  static String? _versionNameFrom(String title) {
+    final match = RegExp(r'v?(\d+\.\d+(?:\.\d+)?)').firstMatch(title);
+    return match?.group(1);
   }
 
   /// 下载 APK 字节。
