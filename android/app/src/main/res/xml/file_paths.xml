@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  给"安装更新"用的文件路径授权。
+
+  只需要暴露下载目录下的那一个 APK:FileProvider 的路径配置越窄,
+  能通过 content:// 拿到的文件就越少。
+-->
+<paths>
+    <external-files-path name="update" path="." />
+    <files-path name="internal_update" path="." />
+</paths>

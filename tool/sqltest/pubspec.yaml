@@ -1,0 +1,27 @@
+name: yiji_sqltest
+description: 用桌面版 SQLite 跑 yiji 的数据层测试。
+publish_to: 'none'
+version: 0.1.0
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  # 直接引用 app 的源码,测试跑的就是要发版的那份代码。
+  # 用绝对路径:`..` 被 pub 解析到了 tool\ 而不是项目根,只有绝对路径在
+  # 这个嵌套位置上稳定。
+  yiji:
+    path: D:\Projects\yiji
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  # 桌面端 SQLite 的 FFI 实现。app 本身不需要它(安卓走 sqflite_android),
+  # 放在这里是为了让 native assets 编译不混进 APK 构建。
+  sqflite_common_ffi: any
+  path: any
+
+flutter:
+  uses-material-design: true

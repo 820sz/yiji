@@ -1,0 +1,7 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    # tool/sqltest 是独立的测试包(有自己的 pubspec),由它自己解析依赖,
+    # 不归本包分析——否则 analyzer 会把它的 import 当成缺失依赖报错。
+    - tool/**
