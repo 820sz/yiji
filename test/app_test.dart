@@ -619,6 +619,28 @@ void main() {
       expect(find.text('周一完成的事'), findsOneWidget);
       expect(find.text('周二没做完的事'), findsOneWidget);
     });
+
+    testWidgets('总结页只给已完成的划线,没完成的不能划', (tester) async {
+      // 这条盯着一个真实发生过的 bug:判断写反,导致报告里没做的事全被划掉,
+      // 看着像都做完了。
+      final done = store.seedTask(monday, '做完的事', done: true);
+      final undone = store.seedTask(addDays(monday, 1), '没做的事');
+
+      await pumpApp(tester);
+      await openTab(tester, '我的');
+      await tester.tap(find.text('周报 / 月报'));
+      await tester.pumpAndSettle();
+
+      final doneText = tester.widget<Text>(find.byKey(Key('report-task-${done.id}')));
+      final undoneText = tester.widget<Text>(find.byKey(Key('report-task-${undone.id}')));
+
+      expect(doneText.style?.decoration, TextDecoration.lineThrough);
+      expect(
+        undoneText.style?.decoration,
+        isNot(TextDecoration.lineThrough),
+        reason: '没完成的事被划掉会让人以为做完了',
+      );
+    });
   });
 
   testWidgets('五个页签都能切到,不报错', (tester) async {

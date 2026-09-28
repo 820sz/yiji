@@ -428,6 +428,9 @@ class _DayGroup extends StatelessWidget {
                   Expanded(
                     child: Text(
                       task.text,
+                      // 报告里每条待办都带 key,测试才能精确断言"哪条被划掉了"。
+                      // 之前这里判断写反过(没完成的被划掉),而当时没有测试守着。
+                      key: Key('report-task-${task.id}'),
                       style: TextStyle(
                         fontSize: 14,
                         height: 1.4,
