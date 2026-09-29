@@ -245,13 +245,13 @@ class ProfileScreen extends StatelessWidget {
     );
     if (confirmed != true || !context.mounted) return;
 
-    try {
-      await state.installUpdate();
-    } on Exception catch (error) {
-      if (!context.mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(error.toString())));
-    }
+    // 下载期间留一个**关不掉**的进度弹窗。之前是点了按钮什么都不显示,
+    // 用户只能对着没反应的界面等,失败了也不知道是卡住还是断了。
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _UpdateProgressDialog(state: state, info: info),
+    );
   }
 
   /// 改开屏那句话。
@@ -434,6 +434,121 @@ class _Tile extends StatelessWidget {
       title: Text(title, style: TextStyle(fontSize: 15, color: textPrimary)),
       subtitle: Text(subtitle, style: TextStyle(fontSize: 12.5, color: textSecondary)),
       trailing: Icon(Icons.chevron_right, size: 19, color: textSecondary),
+    );
+  }
+}
+
+/// 下载并安装的进度弹窗。
+///
+/// 全部状态都从 [AppState] 读,自己不持有进度——下载是 state 在跑,
+/// 弹窗只是个显示器,关掉再打开也能接上。
+class _UpdateProgressDialog extends StatefulWidget {
+  const _UpdateProgressDialog({required this.state, required this.info});
+
+  final AppState state;
+  final UpdateInfo info;
+
+  @override
+  State<_UpdateProgressDialog> createState() => _UpdateProgressDialogState();
+}
+
+class _UpdateProgressDialogState extends State<_UpdateProgressDialog> {
+  String? _error;
+  var _started = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 不能在 initState 里直接碰 InheritedWidget,但这里拿的是外部传进来的
+    // state 对象,所以可以立刻起下载。
+    _run();
+  }
+
+  Future<void> _run() async {
+    if (_started) return;
+    _started = true;
+    setState(() => _error = null);
+    try {
+      await widget.state.installUpdate();
+      // 成功后系统安装界面已经弹出来了,这个弹窗没用了。
+      if (mounted) Navigator.of(context).pop();
+    } on Exception catch (error) {
+      if (!mounted) return;
+      // 失败**不关**弹窗:关掉之后用户就只看到界面没反应,
+      // 这正是上次"等半天又报错"的观感来源。
+      setState(() => _error = error.toString());
+    }
+  }
+
+  static String _mb(int bytes) => (bytes / 1024 / 1024).toStringAsFixed(1);
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+
+    return AlertDialog(
+      title: Text(
+        _error == null ? '正在下载' : '下载失败',
+        style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+      ),
+      content: AnimatedBuilder(
+        animation: widget.state,
+        builder: (context, _) {
+          final received = widget.state.updateReceived;
+          final total = widget.state.updateTotal;
+          final progress = widget.state.updateProgress;
+
+          if (_error != null) {
+            return Text(
+              _error!,
+              style: TextStyle(fontSize: 13.5, height: 1.6, color: textSecondary),
+            );
+          }
+
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(4),
+                child: LinearProgressIndicator(
+                  value: progress > 0 ? progress : null,
+                  minHeight: 6,
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                total > 0
+                    ? '${_mb(received)} MB / ${_mb(total)} MB  ·  ${(progress * 100).round()}%'
+                    : '${_mb(received)} MB',
+                style: TextStyle(fontSize: 13, color: textPrimary),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '下载中断会自动重试,请保持网络畅通。',
+                style: TextStyle(fontSize: 12, color: textSecondary),
+              ),
+            ],
+          );
+        },
+      ),
+      actions: [
+        if (_error != null) ...[
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+          FilledButton(
+            onPressed: () {
+              _started = false;
+              _run();
+            },
+            child: const Text('重试'),
+          ),
+        ],
+      ],
     );
   }
 }

@@ -1,8 +1,9 @@
 import 'dart:async';
-import 'dart:typed_data';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../ai/ai_client.dart';
 import '../core/day.dart';
@@ -27,6 +28,17 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
+/// 从选择器拿到的原始字节。
+///
+/// 两个选择器(image_picker / file_picker)返回的类型完全不同,先在
+/// 这里归成一种,后面的"转附件"就只写一遍。
+class _Picked {
+  const _Picked(this.name, this.bytes);
+
+  final String name;
+  final Uint8List bytes;
+}
+
 class _ChatScreenState extends State<ChatScreen> {
   /// 侧边栏要从头部那个按钮打开,所以需要 Scaffold 的句柄。
   final _scaffoldKey = GlobalKey<ScaffoldState>();
@@ -46,6 +58,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 本次要发的图片/文件。发完清空。
   final List<ChatAttachment> _attachments = [];
 
+  /// 正在挑文件。挡住连点:插件同时只能有一个选择器在跑,
+  /// 第二次会以 "already_active" 失败,用户看到的就是又白点一次。
+  var _picking = false;
+
+  /// 本轮读不出来的文件名。挑完统一提示,而不是弹一串 snackbar。
+  final List<String> _rejected = [];
+
   StreamSubscription<AiChunk>? _subscription;
 
   /// 挑图片或文件。
@@ -53,57 +72,98 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 图片走多模态(只有 DeepSeek 的 flash 支持),文本文件读成文本附上。
   /// 挑到不支持的二进制类型时明说,而不是悄悄发出去让模型看见乱码。
   Future<void> _pickFiles({required bool imagesOnly}) async {
-    // 这个版本的 pickFiles 默认支持多选,没有 allowMultiple 参数。
-    //
-    // 整段包在 try 里:系统选择器可能因为权限、缺少可处理的应用等原因抛异常,
-    // 不接住的话用户看到的就是"点了没反应"——最难排查的那种坏法。
-    final List<PlatformFile> files;
+    if (_picking) return;
+    _picking = true;
     try {
-      files = await FilePicker.pickFiles(
-        type: imagesOnly ? FileType.image : FileType.any,
-      );
-    } on Exception catch (error) {
+      final files = imagesOnly
+          // 照片走 image_picker:头像/背景一直在用它,是这台设备上验证过能用的路。
+          // file_picker 拿相册在部分机型上会返回取不到路径的条目。
+          ? await _pickImages()
+          : await _pickAnyFiles();
+      if (files == null) return; // 用户取消
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('打不开选择器:$error')),
-      );
-      return;
+      await _absorb(files);
+    } on Exception catch (error) {
+      _complain('挑选失败:${_describe(error)}');
+    } on Error catch (error) {
+      // 联邦插件没注册时会抛 UnimplementedError,它是 Error 不是 Exception,
+      // 只 catch Exception 的话用户看到的就是"点了没反应"。
+      _complain('挑选失败:${_describe(error)}');
+    } finally {
+      _picking = false;
     }
-    if (files.isEmpty || !mounted) return;
+  }
 
-    final added = <ChatAttachment>[];
-    final rejected = <String>[];
+  /// 相册选图,可多选。
+  Future<List<_Picked>?> _pickImages() async {
+    final picked = await ImagePicker().pickMultiImage(
+      // 展示尺寸不大,压一下省内存,也避免几 MB 的原图撑爆请求。
+      maxWidth: 1600,
+      maxHeight: 1600,
+      imageQuality: 88,
+    );
+    if (picked.isEmpty) return null;
+    final out = <_Picked>[];
+    for (final file in picked) {
+      out.add(_Picked(file.name, await file.readAsBytes()));
+    }
+    return out;
+  }
+
+  /// 系统文件选择器,任意类型。
+  Future<List<_Picked>?> _pickAnyFiles() async {
+    final files = await FilePicker.pickFiles(type: FileType.any);
+    if (files.isEmpty) return null;
+    final out = <_Picked>[];
     for (final picked in files) {
-      final Uint8List bytes;
+      // readAsBytes 走的是插件拷到缓存目录的那份文件。插件取不到路径时
+      // 会抛异常,记下来当"读不了"处理,不让整次选择失败。
       try {
-        bytes = await picked.readAsBytes();
+        out.add(_Picked(picked.name, await picked.readAsBytes()));
       } on Exception {
-        // 读不出来(权限、文件被移走)就跳过这一个,不让整次选择失败。
-        rejected.add(picked.name);
-        continue;
+        _rejected.add(picked.name);
       }
-      final attachment = await ChatAttachment.fromBytes(bytes, picked.name);
+    }
+    return out;
+  }
+
+  /// 把挑到的字节转成附件,并给出反馈。
+  Future<void> _absorb(List<_Picked> files) async {
+    final added = <ChatAttachment>[];
+    for (final picked in files) {
+      final attachment = await ChatAttachment.fromBytes(picked.bytes, picked.name);
       if (attachment == null) {
-        rejected.add(picked.name);
+        _rejected.add(picked.name);
       } else {
         added.add(attachment);
       }
     }
     if (!mounted) return;
+    final rejected = _rejected.toList();
+    _rejected.clear();
     setState(() => _attachments.addAll(added));
     if (added.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            rejected.isEmpty ? '没选到文件' : '这些读不了:${rejected.join('、')}',
-          ),
-        ),
-      );
+      _complain(rejected.isEmpty ? '没选到文件' : '这些读不了:${rejected.join('、')}');
     } else if (rejected.isNotEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('加了 ${added.length} 个,这些读不了:${rejected.join('、')}')),
-      );
+      _complain('加了 ${added.length} 个,这些读不了:${rejected.join('、')}');
     }
+  }
+
+  /// 把异常说成人话。
+  ///
+  /// 插件的错误码本身就是线索("no_activity" 是选择器启动时界面还没回到前台),
+  /// 原来它们只被 toString 成一句泛泛的失败,排查时等于什么都没有。
+  String _describe(Object error) {
+    if (error is PlatformException) {
+      final detail = error.message?.trim() ?? '';
+      return detail.isEmpty ? error.code : '${error.code} · $detail';
+    }
+    return error.toString();
+  }
+
+  void _complain(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
   Future<void> _showAttachSheet() async {
@@ -289,14 +349,9 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount: messages.length + (state.streaming ? 1 : 0),
                     itemBuilder: (context, index) {
                       if (index >= messages.length) {
-                        return _StreamingBlock(
-                          key: const ValueKey('streaming'),
-                          reasoning: state.streamingReasoning,
-                          answer: state.streamingAnswer,
-                          provider: provider,
-                          avatar: state.avatarBytes,
-                          dark: dark,
-                        );
+                        // 用 AppScope.of 现取最新的 state:这一块的父级在流式期间
+                        // 已经不再重建了,闭包里那份 state 还是开始生成时的快照。
+                        return const _StreamingSlot();
                       }
                       final message = messages[index];
                       return _MessageBlock(
@@ -308,6 +363,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         userAvatar: state.userAvatarBytes,
                         userName: state.identityLabel,
                         dark: dark,
+                        isLast: index == messages.length - 1,
                       );
                     },
                   ),
@@ -341,6 +397,37 @@ class _ChatScreenState extends State<ChatScreen> {
             onSend: _send,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 正在生成的那一条。
+///
+/// 只订阅 [AppState.streamTick],所以每收一个字重画的只有这一块;
+/// 外面那层列表、头部和输入框在整段生成期间一动不动——这正是
+/// "回答生成时整页在抖"的根因。
+class _StreamingSlot extends StatelessWidget {
+  const _StreamingSlot();
+
+  @override
+  Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    // 厂商只算一次:每帧重新推一遍既浪费也会让头像组件的入参变化。
+    final provider = AiProvider.from(
+      model: state.aiConfig.model,
+      baseUrl: state.aiConfig.baseUrl,
+    );
+
+    return AnimatedBuilder(
+      animation: state.streamTick,
+      builder: (context, _) => _StreamingBlock(
+        reasoning: state.streamingReasoning,
+        answer: state.streamingAnswer,
+        provider: provider,
+        avatar: state.avatarBytes,
+        dark: dark,
       ),
     );
   }
@@ -591,6 +678,7 @@ class _MessageBlock extends StatelessWidget {
     required this.userAvatar,
     required this.userName,
     required this.dark,
+    this.isLast = false,
   });
 
   final ChatMessage message;
@@ -600,6 +688,12 @@ class _MessageBlock extends StatelessWidget {
   final String userName;
   final bool dark;
 
+  /// 是不是最后一条。
+  ///
+  /// 最后一条刚生成完,思考过程默认展开:流式那一块在生成时是展开的,
+  /// 落库后如果改成收起,回答刚写完的那一瞬间高度会突然变,整列消息跳一下。
+  final bool isLast;
+
   @override
   Widget build(BuildContext context) {
     return Column(
@@ -607,7 +701,11 @@ class _MessageBlock extends StatelessWidget {
           message.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
       children: [
         if (message.hasReasoning)
-          ReasoningPanel(text: message.reasoning, dark: dark),
+          ReasoningPanel(
+            text: message.reasoning,
+            dark: dark,
+            initiallyExpanded: isLast,
+          ),
         _Bubble(
           text: message.content,
           isUser: message.isUser,
@@ -625,7 +723,6 @@ class _MessageBlock extends StatelessWidget {
 /// 正在流式接收的那一条。
 class _StreamingBlock extends StatelessWidget {
   const _StreamingBlock({
-    super.key,
     required this.reasoning,
     required this.answer,
     required this.provider,
@@ -675,6 +772,7 @@ class ReasoningPanel extends StatefulWidget {
     required this.text,
     required this.dark,
     this.live = false,
+    this.initiallyExpanded = false,
   });
 
   final String text;
@@ -683,18 +781,24 @@ class ReasoningPanel extends StatefulWidget {
   /// 正在生成:自动展开、显示进行中的指示。
   final bool live;
 
+  /// 刚生成完的那一条默认展开,避免生成结束时高度突变。其余默认收起。
+  final bool initiallyExpanded;
+
   @override
   State<ReasoningPanel> createState() => _ReasoningPanelState();
 }
 
 class _ReasoningPanelState extends State<ReasoningPanel> {
-  late bool _expanded = widget.live;
+  late bool _expanded = widget.live || widget.initiallyExpanded;
 
   @override
   void didUpdateWidget(ReasoningPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 从"正在思考"变成"思考完了"时收起,把注意力让给回答。
-    if (oldWidget.live && !widget.live) _expanded = false;
+    // 从"正在思考"变成"思考完了"时**保持展开**。
+    //
+    // 以前这里会自动收起,于是回答刚写完的那一瞬间,上面这一块突然缩掉,
+    // 整列消息往上跳一下——用户看到的就是"回答完成时闪一下/跳一下"。
+    // 生成结束时高度不该变,要收起来由他自己点。
   }
 
   @override

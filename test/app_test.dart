@@ -12,6 +12,7 @@ import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
 import 'package:yiji/ui/ai_avatar.dart';
 import 'package:yiji/ui/calendar_screen.dart';
+import 'package:yiji/ui/task_card.dart';
 
 import 'support/fake_store.dart';
 
@@ -527,13 +528,15 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('这周你码了 5k,比上周稳。'), findsOneWidget);
-      // 思考过程折叠成一块,默认收起。
+      // 最后一条的思考过程保持展开:生成时它本来就是展开的,
+      // 落库时如果突然收起,整列消息会跳一下。
       expect(find.text('思考过程'), findsOneWidget);
-      expect(find.text('先看他这周的记录,再决定怎么回。'), findsNothing);
+      expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
 
+      // 想看干净的正文就自己点一下收起。
       await tester.tap(find.text('思考过程'));
       await tester.pumpAndSettle();
-      expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
+      expect(find.text('先看他这周的记录,再决定怎么回。'), findsNothing);
     });
 
     testWidgets('发出去的消息会留在对话里', (tester) async {
@@ -826,6 +829,73 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('已完成 1'), findsOneWidget);
+    });
+
+    testWidgets('打钩时卡片颜色是过渡的,不是一下就换掉', (tester) async {
+      store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+
+      Color cardColor() {
+        // TaskCard 里只有一层 Material(卡片底),取它就是要看的那块颜色。
+        // 用 Key('task-...') 定位而不是找文字:文字节点每帧都会被重建。
+        final card = find.byType(TaskCard);
+        final material = find.descendant(of: card, matching: find.byType(Material));
+        return (tester.widget(material.first) as Material).color!;
+      }
+
+      final before = cardColor();
+      await tester.tap(find.byIcon(Icons.radio_button_unchecked));
+      // 只推进一帧 + 40ms:这时候应该已经离开起始色,但还没到终色。
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 40));
+      final early = cardColor();
+      await tester.pump(const Duration(milliseconds: 40));
+      final late = cardColor();
+      await tester.pumpAndSettle();
+      final after = cardColor();
+
+      expect(early, isNot(before), reason: '打钩后第一帧就该开始变色');
+      expect(late, isNot(after), reason: '过渡没结束就不该到终色,否则等于没有过渡');
+      expect(after, isNot(before), reason: '最终要变成完成态的配色');
+    });
+  });
+
+  // ---------- 提醒 ----------
+
+  group('日历里设提醒', () {
+    testWidgets('点日期进的那一页可以直接设提醒,不用先建任务', (tester) async {
+      // 这一页是点日历上的日期进来的。提醒的入口必须在这一层:
+      // 让他先建任务、再钻进任务里设提醒,是把一步的事拆成三步。
+      store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+      await openTab(tester, '日历');
+
+      await tester.tap(find.text('${DateTime.now().day}').first);
+      await tester.pumpAndSettle();
+
+      expect(find.byTooltip('加提醒'), findsOneWidget);
+    });
+
+    testWidgets('设完提醒会在这一页列出来,并且能取消', (tester) async {
+      store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+      await openTab(tester, '日历');
+
+      await tester.tap(find.text('${DateTime.now().day}').first);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('加提醒'));
+      await tester.pumpAndSettle();
+      // 时间选择器直接确定(默认 08:00)。
+      await tester.tap(find.text('OK'));
+      await tester.pumpAndSettle();
+
+      // 列表里出现这个时刻。
+      expect(find.text('08:00'), findsOneWidget);
+
+      await tester.tap(find.byTooltip('取消这个提醒'));
+      await tester.pumpAndSettle();
+      expect(find.text('08:00'), findsNothing);
     });
   });
 

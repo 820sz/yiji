@@ -99,4 +99,21 @@ class ReminderNotifier {
       // 取消失败没有可补救的动作。
     }
   }
+
+  /// 系统有没有允许本应用发通知。
+  ///
+  /// 用户设了提醒却什么都没收到时,原因几乎总是这个开关被关了(Android 13
+  /// 起要显式授权,而且授权后还能在系统设置里关掉)。界面要能问出这个状态,
+  /// 把话说清楚,而不是让提醒悄悄不响——那是这个功能最难受的坏法。
+  /// 查不出来时返回 null(桌面/测试环境没有这个实现)。
+  Future<bool?> notificationsEnabled() async {
+    try {
+      final android = _plugin
+          .resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>();
+      if (android == null) return null;
+      return await android.areNotificationsEnabled();
+    } catch (_) {
+      return null;
+    }
+  }
 }

@@ -62,71 +62,101 @@ class TaskCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final fill = AppTheme.cardFill(task.color, done: task.done, dark: dark);
-    final foreground = AppTheme.cardForeground(task.color, done: task.done, dark: dark);
+    // 未完成 / 已完成两种配色,由下面那个 doneAmount 插值到当前状态。
+    final undoneFill = AppTheme.cardFill(task.color, done: false, dark: dark);
+    final doneFill = AppTheme.cardFill(task.color, done: true, dark: dark);
+    final undoneForeground = AppTheme.cardForeground(task.color, done: false, dark: dark);
+    final doneForeground = AppTheme.cardForeground(task.color, done: true, dark: dark);
 
     final card = Padding(
       padding: const EdgeInsets.only(bottom: AppTheme.cardGap),
-      child: Material(
-        color: fill,
-        borderRadius: BorderRadius.circular(AppTheme.cardRadius),
-        clipBehavior: Clip.antiAlias,
-        child: InkWell(
-          onTap: selecting ? onToggleSelect : onTap,
-          onLongPress: onLongPress,
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // 多选模式下的勾选框只在需要时占位,平时用打钩圆圈。
-                AnimatedSize(
-                  duration: AppTheme.fast,
-                  curve: AppTheme.easeOut,
-                  alignment: Alignment.centerLeft,
-                  child: selecting
-                      ? Padding(
-                          padding: const EdgeInsets.only(right: 12, top: 1),
-                          child: Icon(
-                            selected ? Icons.check_box : Icons.check_box_outline_blank,
-                            size: 22,
-                            color:
-                                selected ? AppTheme.accent : foreground.withValues(alpha: 0.5),
+      child: TweenAnimationBuilder<double>(
+        // 0 = 未完成,1 = 已完成。颜色和字重都跟着它走,所以打钩时
+        // 卡片是"慢慢变灰"的,而不是"啪"地换一张脸。
+        //
+        // begin 固定为 0(未完成):卡片打钩后会从"未完成"那一段挪到
+        // "已完成"那一段,换父级意味着这是一个新 element,隐式动画没有
+        // 可插值的起点。从 0 起步正好补上这段——新挂载的卡片自己把颜色
+        // 走一遍,看上去就是接着刚才那一帧在变。
+        tween: Tween<double>(begin: 0, end: task.done ? 1 : 0),
+        duration: AppTheme.fast,
+        curve: AppTheme.easeOut,
+        builder: (context, doneAmount, child) {
+          final shownFill = Color.lerp(undoneFill, doneFill, doneAmount)!;
+          final shownForeground =
+              Color.lerp(undoneForeground, doneForeground, doneAmount)!;
+          return Material(
+            color: shownFill,
+            borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+            clipBehavior: Clip.antiAlias,
+            child: InkWell(
+              onTap: selecting ? onToggleSelect : onTap,
+              onLongPress: onLongPress,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    // 多选模式下的勾选框只在需要时占位,平时用打钩圆圈。
+                    AnimatedSize(
+                      duration: AppTheme.fast,
+                      curve: AppTheme.easeOut,
+                      alignment: Alignment.centerLeft,
+                      child: selecting
+                          ? Padding(
+                              padding: const EdgeInsets.only(right: 12, top: 1),
+                              child: Icon(
+                                selected
+                                    ? Icons.check_box
+                                    : Icons.check_box_outline_blank,
+                                size: 22,
+                                color: selected
+                                    ? AppTheme.accent
+                                    : shownForeground.withValues(alpha: 0.5),
+                              ),
+                            )
+                          : const SizedBox.shrink(),
+                    ),
+                    Expanded(
+                      child: Text(
+                        task.text,
+                        style: TextStyle(
+                          fontSize: 16,
+                          height: 1.45,
+                          // 字重跟着同一个进度插值,和颜色一起过渡。
+                          fontWeight: FontWeight.lerp(
+                            FontWeight.w500,
+                            FontWeight.w400,
+                            doneAmount,
                           ),
-                        )
-                      : const SizedBox.shrink(),
-                ),
-                Expanded(
-                  child: Text(
-                    task.text,
-                    style: TextStyle(
-                      fontSize: 16,
-                      height: 1.45,
-                      fontWeight: task.done ? FontWeight.w400 : FontWeight.w500,
-                      color: foreground,
-                      decoration: task.done ? TextDecoration.lineThrough : null,
-                      decorationColor: foreground,
-                      decorationThickness: 1.6,
+                          color: shownForeground,
+                          decoration: task.done
+                              ? TextDecoration.lineThrough
+                              : null,
+                          decorationColor: shownForeground,
+                          decorationThickness: 1.6,
+                        ),
+                      ),
                     ),
-                  ),
+                    if (!selecting && !reordering)
+                      Padding(
+                        padding: const EdgeInsets.only(left: 10, top: 1),
+                        child: _DoneMark(
+                          done: task.done,
+                          foreground: shownForeground,
+                          dark: dark,
+                          // 打钩与文字分开命中:点圈只打钩,点文字进编辑。
+                          onTap: onToggleDone,
+                        ),
+                      ),
+                    if (reordering && dragHandle != null)
+                      Padding(padding: const EdgeInsets.only(left: 6), child: dragHandle),
+                  ],
                 ),
-                if (!selecting && !reordering)
-                  Padding(
-                    padding: const EdgeInsets.only(left: 10, top: 1),
-                    child: _DoneMark(
-                      done: task.done,
-                      foreground: foreground,
-                      dark: dark,
-                      // 打钩与文字分开命中:点圈只打钩,点文字进编辑。
-                      onTap: onToggleDone,
-                    ),
-                  ),
-                if (reordering && dragHandle != null)
-                  Padding(padding: const EdgeInsets.only(left: 6), child: dragHandle),
-              ],
+              ),
             ),
-          ),
-        ),
+          );
+        },
       ),
     );
 

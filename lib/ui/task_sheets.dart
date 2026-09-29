@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../core/day.dart';
 import '../data/models.dart';
 import '../data/palette.dart';
 import '../data/record_store.dart';
+import '../data/reminder.dart';
 import '../state/app_state.dart';
 import 'task_card.dart';
 import 'theme.dart';
@@ -222,6 +224,7 @@ class _DayEditorSheet extends StatefulWidget {
 class _DayEditorSheetState extends State<_DayEditorSheet> {
   final _controller = TextEditingController();
   List<Task> _tasks = const [];
+  List<Reminder> _reminders = const [];
   bool _loading = true;
 
   @override
@@ -240,11 +243,79 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
     if (!mounted) return;
     final state = AppScope.of(context);
     final tasks = await state.tasksOn(widget.day);
+    final reminders = await state.remindersOn(widget.day);
     if (!mounted) return;
     setState(() {
       _tasks = tasks;
+      _reminders = reminders;
       _loading = false;
     });
+  }
+
+  /// 在选中的这一天加一个提醒。
+  ///
+  /// 提醒必须挂在某条任务上(通知正文也从任务内容里取),所以这里会顺手
+  /// 建一条同名任务。用户想做的其实是"记一件事,到点提醒我"——让他先去
+  /// 建任务、再点进任务里设提醒,是把一步的事拆成了三步。
+  Future<void> _addReminder() async {
+    final state = AppScope.of(context);
+    final text = _controller.text.trim();
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: const TimeOfDay(hour: 8, minute: 0),
+    );
+    if (picked == null || !mounted) return;
+
+    final at = '${picked.hour.toString().padLeft(2, '0')}:'
+        '${picked.minute.toString().padLeft(2, '0')}';
+    // 内容留空时用这句兜底,总比一条没有正文的通知好。
+    final title = text.isEmpty ? '到点提醒' : text;
+    final taskId = await state.addTaskOn(widget.day, title);
+    final task = Task(
+      id: taskId,
+      day: widget.day,
+      text: title,
+      done: false,
+      sortOrder: 0,
+      createdAt: DateTime.now(),
+    );
+    await state.addReminder(task: task, day: widget.day, at: at, note: title);
+    if (!mounted) return;
+    _controller.clear();
+    await _reload();
+    await _warnIfNotificationsOff(state);
+  }
+
+  /// 通知开关关着的时候说清楚,并给一个直接去开的入口。
+  ///
+  /// 排程本身是成功的,但系统不会弹——不说的话用户只会觉得"设了没有用",
+  /// 然后反复设、反复没用。
+  Future<void> _warnIfNotificationsOff(AppState state) async {
+    final enabled = await state.notificationsEnabled();
+    if (enabled != false || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('提醒已设好,但系统通知权限没开,到点不会弹'),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: '去开启',
+          onPressed: _openNotificationSettings,
+        ),
+      ),
+    );
+  }
+
+  static const _settingsChannel = MethodChannel('com.xi283.yiji/app');
+
+  static Future<void> _openNotificationSettings() async {
+    try {
+      await _settingsChannel.invokeMethod<void>('openNotificationSettings');
+    } on PlatformException {
+      // 打不开就只能靠用户自己去系统设置里找,不额外打扰。
+    } on MissingPluginException {
+      // 同上:没有这个原生实现(桌面/测试环境)。
+    }
   }
 
   Future<void> _add() async {
@@ -315,6 +386,13 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
                       ],
                     ),
                     const Spacer(),
+                    // 提醒的入口放在这一层:点日期进来就能设,和系统日历一样,
+                    // 不用先建任务再钻进任务里找。
+                    IconButton(
+                      onPressed: _addReminder,
+                      icon: const Icon(Icons.add_alert_outlined, size: 20),
+                      tooltip: '加提醒',
+                    ),
                     if (widget.day != state.currentDay)
                       TextButton.icon(
                         onPressed: () async {
@@ -335,6 +413,47 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
                         controller: scrollController,
                         padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
                         children: [
+                          // 这一天设过的提醒。列在最上面:它是这一页里唯一
+                          // "会主动打扰你"的东西,漏看了就会白设。
+                          if (_reminders.isNotEmpty) ...[
+                            for (final reminder in _reminders)
+                              ListTile(
+                                contentPadding: EdgeInsets.zero,
+                                dense: true,
+                                leading: Icon(
+                                  Icons.notifications_active_outlined,
+                                  size: 20,
+                                  color: AppTheme.accent,
+                                ),
+                                title: Text(
+                                  reminder.at,
+                                  style: TextStyle(
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                    color: textPrimary,
+                                  ),
+                                ),
+                                subtitle: Text(
+                                  reminder.note.isEmpty ? '到点提醒' : reminder.note,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: TextStyle(fontSize: 12.5, color: textSecondary),
+                                ),
+                                trailing: IconButton(
+                                  icon: Icon(
+                                    Icons.close,
+                                    size: 18,
+                                    color: textSecondary,
+                                  ),
+                                  tooltip: '取消这个提醒',
+                                  onPressed: () async {
+                                    await state.deleteReminder(reminder.id);
+                                    await _reload();
+                                  },
+                                ),
+                              ),
+                            const SizedBox(height: 4),
+                          ],
                           if (_tasks.isEmpty)
                             Padding(
                               padding: const EdgeInsets.symmetric(vertical: 28),
@@ -615,6 +734,39 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
     );
     if (!mounted) return;
     setState(() => _reminderAt = at);
+    await _warnIfNotificationsOff(state);
+  }
+
+  /// 通知开关关着的时候说清楚,并给一个直接去开的入口。
+  ///
+  /// 排程本身是成功的,但系统不会弹——不说的话用户只会觉得"设了没有用",
+  /// 然后反复设、反复没用。
+  Future<void> _warnIfNotificationsOff(AppState state) async {
+    final enabled = await state.notificationsEnabled();
+    if (enabled != false || !mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('提醒已设好,但系统通知权限没开,到点不会弹'),
+        duration: const Duration(seconds: 6),
+        action: SnackBarAction(
+          label: '去开启',
+          onPressed: () => _openNotificationSettings(),
+        ),
+      ),
+    );
+  }
+
+  static const _settingsChannel = MethodChannel('com.xi283.yiji/app');
+
+  Future<void> _openNotificationSettings() async {
+    try {
+      await _settingsChannel.invokeMethod<void>('openNotificationSettings');
+    } on PlatformException {
+      // 打不开就只能靠用户自己去系统设置里找,不额外打扰。
+    } on MissingPluginException {
+      // 同上:没有这个原生实现(桌面/测试环境)。
+    }
   }
 
   static TimeOfDay? _parseTime(String? at) {

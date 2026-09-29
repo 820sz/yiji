@@ -842,18 +842,83 @@ class _ManualProgressSheetState extends State<_ManualProgressSheet> {
 }
 
 /// 进度明细:能看到每一次推进是哪来的,也能删掉算错的那条。
-class _HistorySheet extends StatelessWidget {
+class _HistorySheet extends StatefulWidget {
   const _HistorySheet({required this.goal, required this.entries});
 
   final Goal goal;
   final List<ProgressEntry> entries;
 
   @override
-  Widget build(BuildContext context) {
+  State<_HistorySheet> createState() => _HistorySheetState();
+}
+
+class _HistorySheetState extends State<_HistorySheet> {
+  late List<ProgressEntry> _entries = List.of(widget.entries);
+
+  Goal get goal => widget.goal;
+
+  /// 改一条已经记下的推进。
+  ///
+  /// AI 判断错了(把不相干的事算进来,或者数字读错)时,用户要能当场改对,
+  /// 而不是只能删掉重来——手动修正正是"让 AI 自己判断"这个方案成立的前提。
+  Future<void> _editEntry(ProgressEntry entry) async {
     final state = AppScope.of(context);
+    final controller = TextEditingController(
+      text: Goal.formatAmount(entry.amount),
+    );
+    final value = await showDialog<double>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('改成多少'),
+        content: TextField(
+          controller: controller,
+          autofocus: true,
+          keyboardType: const TextInputType.numberWithOptions(decimal: true),
+          decoration: InputDecoration(
+            suffixText: goal.unit.isEmpty ? null : goal.unit,
+            hintText: '推进量',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(
+              context,
+              double.tryParse(controller.text.trim()),
+            ),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    if (value == null || value <= 0) return;
+
+    await state.updateProgressEntry(entry.id, amount: value);
+    if (!mounted) return;
+    final refreshed = await state.progressHistory(goal);
+    if (!mounted) return;
+    setState(() => _entries = refreshed);
+  }
+
+  Future<void> _deleteEntry(ProgressEntry entry) async {
+    final state = AppScope.of(context);
+    await state.deleteProgressEntry(entry.id);
+    if (!mounted) return;
+    final refreshed = await state.progressHistory(goal);
+    if (!mounted) return;
+    setState(() => _entries = refreshed);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final entries = _entries;
 
     return SafeArea(
       child: Padding(
@@ -894,6 +959,8 @@ class _HistorySheet extends StatelessWidget {
                         final entry = entries[index];
                         return ListTile(
                           contentPadding: EdgeInsets.zero,
+                          // 点一下就改数字:AI 看错了要能当场纠正。
+                          onTap: () => _editEntry(entry),
                           title: Text(
                             '+${Goal.formatAmount(entry.amount)} ${goal.unit}',
                             style: TextStyle(
@@ -913,10 +980,7 @@ class _HistorySheet extends StatelessWidget {
                           trailing: IconButton(
                             icon: Icon(Icons.delete_outline, size: 20, color: textSecondary),
                             tooltip: '删掉这条',
-                            onPressed: () async {
-                              await state.deleteProgressEntry(entry.id);
-                              if (context.mounted) Navigator.pop(context);
-                            },
+                            onPressed: () => _deleteEntry(entry),
                           ),
                         );
                       },

@@ -86,11 +86,15 @@ class GoalMatcher {
 
       final goal = goals[goalIndex - 1];
       final task = tasks[taskIndex - 1];
+      // 单位:模型在这次判断里用的那个优先。用户在目标上定过单位就听用户的,
+      // 没定过(比如「读xx书」建的时候没填)则接受模型从待办里读出来的单位,
+      // 否则"读了30页"会显示成光秃秃的"推进 30"。
+      final suggestedUnit = (entry['unit'] as String?)?.trim() ?? '';
       result.add(
         ProgressSuggestion(
           goalId: goal.id,
           goalTitle: goal.title,
-          unit: goal.unit,
+          unit: goal.unit.isNotEmpty ? goal.unit : suggestedUnit,
           amount: amount,
           reason: (entry['reason'] as String?)?.trim() ?? '',
           taskId: task.id,

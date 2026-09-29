@@ -103,6 +103,9 @@ class AppState extends ChangeNotifier {
   bool _matching = false;
   bool get matching => _matching;
 
+  /// 正在自动同步(打钩之后后台跑的那次)。
+  bool _autoSyncing = false;
+
   // ---------- 日历 ----------
 
   /// 日历当前显示的月份(该月任意一天即可)。
@@ -123,6 +126,13 @@ class AppState extends ChangeNotifier {
 
   String _streamingAnswer = '';
   String get streamingAnswer => _streamingAnswer;
+
+  /// 流式内容的变更通知。
+  ///
+  /// 单独一个 notifier,而不是每收一个字就 [notifyListeners]:
+  /// 后者会把整个聊天页(消息列表、输入框、头部)每帧重建一遍,
+  /// 长回答下就是持续抖动。只让那一块正在长的气泡监听这个,其余部分不动。
+  final ValueNotifier<int> streamTick = ValueNotifier<int>(0);
 
   bool get streaming => _streamingAnswer.isNotEmpty || _streamingReasoning.isNotEmpty;
 
@@ -192,6 +202,15 @@ class AppState extends ChangeNotifier {
   double _updateProgress = 0;
   double get updateProgress => _updateProgress;
 
+  /// 已下载 / 总大小(字节)。总大小未知时为 0。
+  ///
+  /// 百分比会被 Content-Length 缺失或网络卡顿骗到,字节数是用户能自己
+  /// 判断"还在动没有"的证据,所以两个都往界面上送。
+  int _updateReceived = 0;
+  int _updateTotal = 0;
+  int get updateReceived => _updateReceived;
+  int get updateTotal => _updateTotal;
+
   /// 启动时静默查一次。
   ///
   /// 失败就什么都不做:检查更新不该在开机时弹网络错误打断用户。
@@ -233,6 +252,8 @@ class AppState extends ChangeNotifier {
 
     _updating = true;
     _updateProgress = 0;
+    _updateReceived = 0;
+    _updateTotal = info.sizeBytes;
     notifyListeners();
     try {
       await _installer.downloadAndInstall(
@@ -240,6 +261,11 @@ class AppState extends ChangeNotifier {
         info,
         onProgress: (value) {
           _updateProgress = value;
+          notifyListeners();
+        },
+        onBytes: (received, total) {
+          _updateReceived = received;
+          if (total > 0) _updateTotal = total;
           notifyListeners();
         },
       );
@@ -306,9 +332,12 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> toggleTask(Task task) async {
-    await _store.setTaskDone(task.id, !task.done);
+    final nowDone = !task.done;
+    await _store.setTaskDone(task.id, nowDone);
     await _loadDay();
     await _refreshPendingSync();
+    // 刚打完钩就顺手让 AI 量化一次,用户不用记得去点同步按钮。
+    if (nowDone) unawaited(_autoSyncProgress());
   }
 
   Future<void> editTask(Task task, String text) async {
@@ -400,18 +429,22 @@ class AppState extends ChangeNotifier {
   Future<List<Task>> tasksOn(String day) => _store.tasksOfDay(day);
 
   /// 在指定日期上加一条待办(用于提前规划未来)。
-  Future<void> addTaskOn(String day, String text, {TaskColor? color}) async {
-    if (text.trim().isEmpty) return;
-    await _store.addTask(day, text, color: color);
+  /// 往指定的某一天加一条任务。返回新任务的 id(设提醒时要拿它挂上去)。
+  Future<int> addTaskOn(String day, String text, {TaskColor? color}) async {
+    if (text.trim().isEmpty) return 0;
+    final id = await _store.addTask(day, text, color: color);
     await loadCalendarMonth(_calendarMonth);
     if (day == _currentDay) await _loadDay();
+    return id;
   }
 
   Future<void> toggleTaskOn(String day, Task task) async {
-    await _store.setTaskDone(task.id, !task.done);
+    final nowDone = !task.done;
+    await _store.setTaskDone(task.id, nowDone);
     await loadCalendarMonth(_calendarMonth);
     if (day == _currentDay) await _loadDay();
     await _refreshPendingSync();
+    if (nowDone) unawaited(_autoSyncProgress());
   }
 
   Future<void> deleteTaskOn(String day, Task task) async {
@@ -575,7 +608,6 @@ class AppState extends ChangeNotifier {
     await _store.deleteProgress(id);
     await refreshGoals();
   }
-
   Future<List<ProgressEntry>> progressHistory(Goal goal) =>
       _store.progressEntriesOfGoal(goal.id);
 
@@ -622,10 +654,35 @@ class AppState extends ChangeNotifier {
         taskId: suggestion.taskId,
         source: 'ai',
       );
+      // 建目标时没填单位的(AI 当时也可能读不出来),在这里补上:
+      // 判断这一次推进时模型已经看到了具体的量,它给的单位比建目标时猜的准。
+      final goal = _goals.where((g) => g.id == suggestion.goalId).firstOrNull;
+      if (goal != null && goal.unit.isEmpty && suggestion.unit.isNotEmpty) {
+        await _store.updateGoal(goal.copyWith(unit: suggestion.unit));
+      }
     }
     _suggestions = const [];
     await refreshGoals();
     return accepted.length;
+  }
+
+  /// 打完钩之后自动跑一次 AI 量化。
+  ///
+  /// 这是这个功能的正常路径:用户不需要记得去点什么按钮,勾完就有进度。
+  /// 出错的代价很低——落库前会把结果摆出来给他确认,判断错了也能改。
+  /// 没配 key、没建目标、正在跑,都安静地跳过。
+  Future<void> _autoSyncProgress() async {
+    if (_autoSyncing || _matching) return;
+    if (!aiConfig.isUsable || activeGoals.isEmpty) return;
+    _autoSyncing = true;
+    try {
+      final count = await requestProgressSuggestions();
+      if (count > 0) notifyListeners();
+    } on Exception {
+      // AI 暂时不可用不该打扰打钩这个动作,进度页上还有手动同步的入口。
+    } finally {
+      _autoSyncing = false;
+    }
   }
 
   void dismissSuggestions() {
@@ -871,7 +928,9 @@ class AppState extends ChangeNotifier {
       } else {
         _streamingAnswer += chunk.text;
       }
-      notifyListeners();
+      // 只惊动正在长的那个气泡。整页 notifyListeners 会让每一帧都重排
+      // 全部消息,看上去就是抖。
+      streamTick.value++;
       yield chunk;
     }
   }
@@ -897,6 +956,7 @@ class AppState extends ChangeNotifier {
     final reasoning = _streamingReasoning.trim();
     _streamingAnswer = '';
     _streamingReasoning = '';
+    streamTick.value++;
     if (answer.isEmpty || _currentConversationId == 0) {
       notifyListeners();
       return;
@@ -953,6 +1013,12 @@ class AppState extends ChangeNotifier {
     await syncReminders();
     notifyListeners();
   }
+
+  /// 系统通知开关是不是开着的。查不出来时为 null。
+  ///
+  /// 设提醒的界面上要问这个:开关关着的话,提醒排了也不会响,
+  /// 用户只会觉得"设了没用"。
+  Future<bool?> notificationsEnabled() => _notifier.notificationsEnabled();
 
   /// 把未来一周的提醒重新排进系统通知。
   ///

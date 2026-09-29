@@ -22,10 +22,12 @@ class ApkInstaller {
   /// 下载并打开系统安装界面。
   ///
   /// [onProgress] 收到 0..1 的进度。
+  /// [onBytes] 收到 (已下载, 总大小) 字节数。
   Future<void> downloadAndInstall(
     AppUpdater updater,
     UpdateInfo info, {
     void Function(double progress)? onProgress,
+    void Function(int received, int total)? onBytes,
   }) async {
     final directory = await getExternalStorageDirectory() ??
         await getApplicationDocumentsDirectory();
@@ -35,7 +37,20 @@ class ApkInstaller {
     if (await file.exists()) await file.delete();
 
     onProgress?.call(0);
-    final bytes = await updater.download(info);
+    final bytes = await updater.download(
+      info,
+      onProgress: onProgress,
+      onBytes: onBytes,
+    );
+
+    // 校验一次大小再落盘。下载中途断过的话,这里能挡住一个装不上的残包,
+    // 而不是留给系统安装器报一句看不懂的错。
+    if (info.sizeBytes > 0 && bytes.length != info.sizeBytes) {
+      throw UpdateException(
+        '下载不完整(${bytes.length}/${info.sizeBytes} 字节),请重试',
+      );
+    }
+
     await file.writeAsBytes(bytes, flush: true);
     onProgress?.call(1);
 

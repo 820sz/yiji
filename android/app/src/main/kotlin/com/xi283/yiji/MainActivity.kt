@@ -23,6 +23,10 @@ import java.io.File
 class MainActivity : FlutterActivity() {
     private val channelName = "com.xi283.yiji/install"
 
+    /// 打开系统设置用的通道。和安装分开:安装那条只在下载更新时用,
+    /// 这条会在用户设提醒、发现通知没开时用到。
+    private val settingsChannelName = "com.xi283.yiji/app"
+
     override fun onCreate(savedInstanceState: Bundle?) {
         WindowCompat.setDecorFitsSystemWindows(window, false)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -49,6 +53,43 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, settingsChannelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "openNotificationSettings" -> {
+                        result.success(openNotificationSettings())
+                    }
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    /// 跳到本应用的通知设置页。
+    ///
+    /// Android 8 起可以直接落到应用的通知页;更老的系统只能落到应用详情页。
+    private fun openNotificationSettings(): Boolean {
+        val intents = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                add(
+                    Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                        .putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
+                )
+            }
+            add(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                    .setData(Uri.parse("package:$packageName"))
+            )
+        }
+        for (intent in intents) {
+            try {
+                startActivity(intent)
+                return true
+            } catch (_: Exception) {
+                // 这个 ROM 没有这个页面,试下一个。
+            }
+        }
+        return false
     }
 
     /// Android 8 起安装未知来源应用需要用户单独授权。

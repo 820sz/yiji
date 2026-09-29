@@ -10,13 +10,20 @@ class UpdateInfo {
     required this.downloadUrl,
     required this.notes,
     required this.sizeBytes,
+    this.apiDownloadUrl = '',
   });
 
   final String versionName;
   final int versionCode;
 
-  /// APK 直链。
+  /// APK 直链(浏览器下载地址)。
   final String downloadUrl;
+
+  /// API 的 asset 地址,备用下载入口。
+  ///
+  /// 两条路都指向同一个文件,但走的是不同的域名。用户网络把其中一个
+  /// 拦掉或掐断时,另一个往往能过——这也是重试能奏效的原因之一。
+  final String apiDownloadUrl;
 
   /// 更新说明(release 正文)。
   final String notes;
@@ -101,6 +108,7 @@ class AppUpdater {
       versionName: versionName,
       versionCode: code,
       downloadUrl: (apk['browser_download_url'] as String?) ?? '',
+      apiDownloadUrl: (apk['url'] as String?) ?? '',
       notes: (release['body'] as String?)?.trim() ?? '',
       sizeBytes: (apk['size'] as num?)?.toInt() ?? 0,
     );
@@ -122,21 +130,117 @@ class AppUpdater {
     return match?.group(1);
   }
 
-  /// 下载 APK 字节。
+  /// 下载 APK。
   ///
-  /// 走浏览器直链(`browser_download_url`)而不是 API 的 asset 接口,
-  /// 这样公开仓库也不需要 token。
-  Future<List<int>> download(UpdateInfo info) async {
-    final http.Response response;
+  /// 做了三件事来对付真实网络:
+  /// 1. **流式读**并回报进度——一次性 await 整个 body 时用户看不到任何变化,
+  ///    失败时也分不清是卡住还是断了;
+  /// 2. **断线重试**。GitHub 的下载会 302 到 release-assets.githubusercontent.com,
+  ///    部分网络下这条连接会被中途掐断(报 Connection closed before full header),
+  ///    重试通常就能过;
+  /// 3. **多个候选地址**:主地址失败后退回 API 的 asset 地址。
+  ///
+  /// [onProgress] 收到 0..1;总长度拿不到时只在结束时回调 1。
+  /// [onBytes] 收到 (已下载, 总大小),总大小未知时为 0——界面靠它显示
+  /// "12.3 MB / 54.9 MB" 这种用户能判断"是不是在动"的数字。
+  Future<List<int>> download(
+    UpdateInfo info, {
+    void Function(double progress)? onProgress,
+    void Function(int received, int total)? onBytes,
+    int maxAttempts = 3,
+  }) async {
+    final urls = <String>{
+      if (info.downloadUrl.isNotEmpty) info.downloadUrl,
+      if (info.apiDownloadUrl.isNotEmpty) info.apiDownloadUrl,
+    }.toList();
+    if (urls.isEmpty) throw UpdateException('这个版本没有可用的下载地址');
+
+    Object? lastError;
+    for (var attempt = 0; attempt < maxAttempts; attempt++) {
+      final url = urls[attempt % urls.length];
+      try {
+        return await _downloadOnce(
+          url,
+          fallbackTotal: info.sizeBytes,
+          onProgress: onProgress,
+          onBytes: onBytes,
+        );
+      } on Exception catch (error) {
+        lastError = error;
+        // 退一步再试:立刻重连往往还是被同一个原因掐断。
+        await Future<void>.delayed(Duration(milliseconds: 600 * (attempt + 1)));
+      }
+    }
+    throw UpdateException(
+      '下载失败,试了 $maxAttempts 次。可以换 Wi-Fi 再试,'
+      '或者到 GitHub 的 releases 页面手动下载。($lastError)',
+    );
+  }
+
+  /// 单次流式下载。
+  Future<List<int>> _downloadOnce(
+    String url, {
+    required int fallbackTotal,
+    void Function(double progress)? onProgress,
+    void Function(int received, int total)? onBytes,
+  }) async {
+    final http.StreamedResponse response;
     try {
-      response = await _http.get(Uri.parse(info.downloadUrl));
+      response = await _http
+          .send(http.Request('GET', Uri.parse(url)))
+          .timeout(const Duration(seconds: 30));
     } on Exception catch (error) {
-      throw UpdateException('下载失败:$error');
+      throw UpdateException('连不上下载服务器:$error');
     }
     if (response.statusCode != 200) {
       throw UpdateException('下载失败(${response.statusCode})');
     }
-    return response.bodyBytes;
+
+    // 服务端没给 Content-Length 时退回 release 里登记的大小,界面才有分母。
+    final total = response.contentLength ?? fallbackTotal;
+    final bytes = <int>[];
+    onProgress?.call(0);
+    onBytes?.call(0, total);
+
+    // 回报节流:每收满总量的 2% 报一次,同时兜住"太频繁"和"太稀疏"两头。
+    // 纯按字节数的话,慢网下每个 socket 块都不到阈值,全程可能只在结束时
+    // 报一次;纯按时间的话,快网下又会漏掉整整一段进度(4KB 的小包就是这么
+    // 撞上来的)。先攒够 128KB 再开始节流,是为了不让 54MB 的包刷出几千次
+    // 界面重建。
+    final minStep = 128 * 1024;
+    final percentStep = total > 0 ? (total * 0.02).round() : minStep;
+    final step = total > 0 && total < minStep
+        ? (total / 4).ceil()
+        : (percentStep > minStep ? percentStep : minStep);
+    var lastReported = 0;
+
+    void report(int received) {
+      lastReported = received;
+      onBytes?.call(received, total);
+      if (total > 0) {
+        onProgress?.call((received / total).clamp(0.0, 1.0));
+      }
+    }
+
+    try {
+      await for (final chunk in response.stream) {
+        bytes.addAll(chunk);
+        if (bytes.length - lastReported < step) continue;
+        report(bytes.length);
+      }
+    } on Exception catch (error) {
+      // 读到一半断了:抛出去交给上层重试,这里不假装成功。
+      // 先把已收到的字节报上去,界面上"下到一半断了"才看得出来。
+      report(bytes.length);
+      throw UpdateException('下载中断:$error');
+    }
+
+    if (total > 0 && bytes.length < total) {
+      throw UpdateException('下载不完整(${bytes.length}/$total 字节)');
+    }
+    onBytes?.call(bytes.length, total);
+    onProgress?.call(1);
+    return bytes;
   }
 
   void dispose() => _http.close();
