@@ -528,6 +528,105 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
   late bool _done = widget.task.done;
   bool _saving = false;
 
+  /// 这条任务已有的提醒时刻(`HH:mm`);null 表示没设。
+  String? _reminderAt;
+
+  /// 提醒只读一次,用这个标记避免 `didChangeDependencies` 反复触发时重复查库。
+  bool _reminderLoaded = false;
+
+  /// 必须在 `didChangeDependencies` 而不是 `initState` 里读 [AppScope]:
+  /// 继承组件不允许在 initState 期间访问。
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    if (_reminderLoaded) return;
+    _reminderLoaded = true;
+    _loadReminder();
+  }
+
+  Future<void> _loadReminder() async {
+    final state = AppScope.of(context);
+    final reminders = await state.remindersOn(widget.day);
+    final own = reminders.where((r) => r.taskId == widget.task.id).firstOrNull;
+    if (!mounted || own == null) return;
+    setState(() => _reminderAt = own.at);
+  }
+
+  /// 设/改/取消提醒。
+  ///
+  /// 走系统通知:提醒的意义在于"app 没开着也能响",应用内提示做不到这件事。
+  Future<void> _setReminder() async {
+    final state = AppScope.of(context);
+    final current = _reminderAt;
+
+    if (current != null) {
+      // 已经有提醒:问是改时间还是取消。
+      final action = await showModalBottomSheet<String>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.schedule),
+                title: const Text('改时间'),
+                onTap: () => Navigator.pop(context, 'change'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.notifications_off_outlined),
+                title: const Text('取消提醒'),
+                onTap: () => Navigator.pop(context, 'remove'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (action == null || !mounted) return;
+      if (action == 'remove') {
+        final reminders = await state.remindersOn(widget.day);
+        for (final reminder in reminders.where((r) => r.taskId == widget.task.id)) {
+          await state.deleteReminder(reminder.id);
+        }
+        if (!mounted) return;
+        setState(() => _reminderAt = null);
+        return;
+      }
+    }
+
+    if (!mounted) return;
+    final picked = await showTimePicker(
+      context: context,
+      initialTime: _parseTime(current) ?? const TimeOfDay(hour: 8, minute: 0),
+    );
+    if (picked == null || !mounted) return;
+
+    final at = '${picked.hour.toString().padLeft(2, '0')}:'
+        '${picked.minute.toString().padLeft(2, '0')}';
+    // 先清掉旧的,避免同一条任务堆出多个提醒。
+    final existing = await state.remindersOn(widget.day);
+    for (final reminder in existing.where((r) => r.taskId == widget.task.id)) {
+      await state.deleteReminder(reminder.id);
+    }
+    await state.addReminder(
+      task: widget.task,
+      day: widget.day,
+      at: at,
+      note: _controller.text.trim(),
+    );
+    if (!mounted) return;
+    setState(() => _reminderAt = at);
+  }
+
+  static TimeOfDay? _parseTime(String? at) {
+    if (at == null) return null;
+    final parts = at.split(':');
+    if (parts.length != 2) return null;
+    final hour = int.tryParse(parts[0]);
+    final minute = int.tryParse(parts[1]);
+    if (hour == null || minute == null) return null;
+    return TimeOfDay(hour: hour, minute: minute);
+  }
+
   @override
   void dispose() {
     _controller.dispose();
@@ -612,7 +711,7 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
                 keyboardType: TextInputType.multiline,
                 style: TextStyle(fontSize: 19, height: 1.55, color: textPrimary),
                 decoration: const InputDecoration(
-                  hintText: '这条待办是什么',
+                  hintText: '这条任务是什么',
                   filled: false,
                   border: InputBorder.none,
                 ),
@@ -666,6 +765,14 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
                       label: _done ? '已完成' : '标记完成',
                       color: _done ? AppTheme.accent : textSecondary,
                       onTap: () => setState(() => _done = !_done),
+                    ),
+                    _EditorAction(
+                      icon: _reminderAt == null
+                          ? Icons.notifications_none
+                          : Icons.notifications_active,
+                      label: _reminderAt == null ? '提醒' : _reminderAt!,
+                      color: _reminderAt == null ? textSecondary : AppTheme.accent,
+                      onTap: _setReminder,
                     ),
                     _EditorAction(
                       icon: Icons.event_outlined,

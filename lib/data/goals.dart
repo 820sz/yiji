@@ -45,13 +45,13 @@ class Goal {
     required this.id,
     required this.title,
     required this.unit,
-    required this.target,
     required this.current,
     required this.period,
     required this.direction,
     required this.color,
     required this.active,
     required this.createdAt,
+    this.target,
     this.startDay,
     this.endDay,
   });
@@ -61,10 +61,13 @@ class Goal {
   /// 如"小说推进"。
   final String title;
 
-  /// 计量单位,如"字""kg""次"。
+  /// 计量单位,如"字""kg""次"。可以是空串(用户没写)。
   final String unit;
 
-  final double target;
+  /// 目标值。**可以为 null**:很多事情一开始根本不知道该推进到多少,
+  /// 「读这本书」要读几页是读着读着才知道的。那时它只是一条推进记录,
+  /// 而不是一个有待完成比例的进度条。
+  final double? target;
 
   /// 当前值 = 所有进度条目之和。由存储层现算,不单独持久化,
   /// 避免"总数和明细对不上"这个最容易腐烂的地方。
@@ -83,23 +86,37 @@ class Goal {
   final String? startDay;
   final String? endDay;
 
-  /// 完成比例,夹在 0..1;目标为 0 时按未完成处理。
+  /// 有没有预设目标值。没有时界面画一条纯推进条,不画"还差多少"。
+  bool get hasTarget => target != null && target! > 0;
+
+  /// 完成比例,夹在 0..1。没有目标值时返回 0——那种情况下这个比例没有意义。
   double get ratio {
-    if (target <= 0) return 0;
-    return (current / target).clamp(0.0, 1.0);
+    final goal = target;
+    if (goal == null || goal <= 0) return 0;
+    return (current / goal).clamp(0.0, 1.0);
   }
 
-  /// 是否已达标。
-  bool get reached => target > 0 && current >= target;
+  /// 是否已达标。没有目标值时永远是 false(没有终点就谈不上到达)。
+  bool get reached => hasTarget && current >= target!;
 
-  /// 还差多少(已达标为 0)。
+  /// 还差多少(已达标或没有目标值时为 0)。
   double get remaining {
-    final left = target - current;
+    final goal = target;
+    if (goal == null) return 0;
+    final left = goal - current;
     return left > 0 ? left : 0;
   }
 
-  /// `1.2万 / 3万 字` 这类展示文本。
-  String get progressLabel => '${formatAmount(current)} / ${formatAmount(target)} $unit';
+  /// `1.2万 / 3万 字`(有目标)或 `已推进 320 页`(没有目标)。
+  String get progressLabel {
+    final goal = target;
+    if (goal == null || goal <= 0) {
+      final amount = formatAmount(current);
+      return unit.isEmpty ? '已推进 $amount' : '已推进 $amount $unit';
+    }
+    final text = '${formatAmount(current)} / ${formatAmount(goal)}';
+    return unit.isEmpty ? text : '$text $unit';
+  }
 
   /// 把数字按中文习惯缩略:过万显示"x.x万",否则去掉多余小数。
   static String formatAmount(double value) {
@@ -167,8 +184,9 @@ class Goal {
     return Goal(
       id: map['id'] as int,
       title: map['title'] as String,
-      unit: map['unit'] as String,
-      target: (map['target'] as num).toDouble(),
+      unit: (map['unit'] as String?) ?? '',
+      // target 列允许为 NULL,所以这里不能用 `as num`。
+      target: (map['target'] as num?)?.toDouble(),
       current: current,
       period: GoalPeriod.fromKey(map['period'] as String?),
       direction: GoalDirection.fromKey(map['direction'] as String?),
@@ -231,18 +249,19 @@ class ProgressEntry {
 /// AI 从一句自然语言里拆出来的目标草稿。
 ///
 /// 用来**预填表单**,不直接建目标:AI 理解错了用户还能当场改。
+/// [target] 可以为 null:说不清要推进到多少的目标照样能建。
 class GoalDraft {
   const GoalDraft({
     required this.title,
-    required this.target,
     required this.unit,
     required this.period,
     required this.direction,
     required this.color,
+    this.target,
   });
 
   final String title;
-  final double target;
+  final double? target;
   final String unit;
   final GoalPeriod period;
   final GoalDirection direction;
@@ -251,7 +270,8 @@ class GoalDraft {
   /// 从模型回包里解析。
   ///
   /// 宽松解析、严格校验:外面可能裹着代码块,字段可能是字符串数字。
-  /// 任何一项缺失或非法就返回 null——宁可不填,也不要预填一堆错的让用户去擦。
+  /// **只有标题是必需的**——没有目标值、没有单位都能建,不能因为
+  /// 模型没给出数字就整条丢掉(那正是"读这本书"建不出来的原因)。
   static GoalDraft? parse(String raw) {
     var text = raw.trim();
     if (text.startsWith('```')) {
@@ -278,13 +298,12 @@ class GoalDraft {
     if (title == null || title.isEmpty) return null;
 
     final target = _asDouble(decoded['target']);
-    if (target == null || target <= 0) return null;
-
     final unit = (decoded['unit'] as String?)?.trim();
     return GoalDraft(
       title: title,
-      target: target,
-      unit: (unit == null || unit.isEmpty) ? '次' : unit,
+      // 模型没给出正数就当没有目标值,而不是判为解析失败。
+      target: (target != null && target > 0) ? target : null,
+      unit: unit ?? '',
       period: GoalPeriod.fromKey(decoded['period'] as String?),
       direction: GoalDirection.fromKey(decoded['direction'] as String?),
       color: TaskColor.fromKey(decoded['color'] as String?),

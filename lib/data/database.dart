@@ -13,7 +13,12 @@ class AppDatabase {
   static const _fileName = 'yiji.db';
 
   /// v2:待办配色、聊天思考过程、目标与进度推进条。
-  static const _version = 2;
+  /// v3:聊天按会话隔离。
+  ///
+  /// v2 及以前所有消息混在一条历史里,新开的对话也能"看到"以前聊过的内容,
+  /// 表现出来就是 AI 无中生有地提起你从没在这个对话里说过的事。
+  /// v3 给消息加上会话归属,并把 `goals.target` 改成可空(推进条可以不预设目标值)。
+  static const _version = 3;
 
   /// 打开(必要时创建或升级)数据库。
   ///
@@ -33,8 +38,8 @@ class AppDatabase {
     await createSchema(db);
   }
 
-  /// 建全部表。`synchronized` 之外的地方(测试、迁移)也用它,
-  /// 避免有人手抄一份建表语句——抄的那份一定会跟这里漂开。
+  /// 建全部表。测试与迁移也用它,避免有人手抄一份建表语句——
+  /// 抄的那份一定会跟这里漂开。
   static Future<void> createSchema(DatabaseExecutor db) async {
     await db.execute('''
       CREATE TABLE tasks (
@@ -60,27 +65,54 @@ class AppDatabase {
       )
     ''');
 
+    await createChatTables(db);
+    await createGoalTables(db);
+    await createReminderTable(db);
+  }
+
+  /// 建聊天相关的表。
+  static Future<void> createChatTables(DatabaseExecutor db) async {
+    await createConversationTable(db);
     await db.execute('''
       CREATE TABLE messages (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id INTEGER NOT NULL,
         role TEXT NOT NULL,
         content TEXT NOT NULL,
         reasoning TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL
       )
     ''');
+    await db.execute(
+      'CREATE INDEX idx_messages_conversation ON messages(conversation_id)',
+    );
+  }
 
-    await createGoalTables(db);
+  /// 只建会话表。v3 迁移里用得上:那时候 messages 表已经存在(v1/v2 就有),
+  /// 只需要补上 conversations 与 messages.conversation_id。
+  static Future<void> createConversationTable(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
   }
 
   /// 建目标与进度相关的表。
+  ///
+  /// `target` 允许为 NULL:很多事情一开始根本不知道该推进到多少
+  /// (「读这本书」要读几页是读着读着才知道的),那时它只是一条推进记录,
+  /// 而不是一个有待完成比例的进度条。
   static Future<void> createGoalTables(DatabaseExecutor db) async {
     await db.execute('''
       CREATE TABLE goals (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL,
-        unit TEXT NOT NULL,
-        target REAL NOT NULL,
+        unit TEXT NOT NULL DEFAULT '',
+        target REAL,
         period TEXT NOT NULL,
         direction TEXT NOT NULL DEFAULT 'increase',
         color TEXT NOT NULL DEFAULT 'blue',
@@ -107,13 +139,85 @@ class AppDatabase {
     await db.execute('CREATE INDEX idx_progress_day ON progress_entries(day)');
   }
 
+  /// 建提醒表(日历里给某条任务设的定时提醒)。
+  static Future<void> createReminderTable(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE reminders (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id INTEGER NOT NULL,
+        day TEXT NOT NULL,
+        at TEXT NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL
+      )
+    ''');
+    await db.execute('CREATE INDEX idx_reminders_day ON reminders(day)');
+  }
+
   /// 版本升级。每一步只做"从上一版到这一版"的增量改动。
   static Future<void> _upgrade(Database db, int from, int to) async {
     if (from < 2) {
-      // v2:待办加配色;聊天加思考过程;新增目标与进度表。
+      // v2:任务加配色;聊天加思考过程;新增目标与进度表。
       await db.execute("ALTER TABLE tasks ADD COLUMN color TEXT NOT NULL DEFAULT 'blue'");
       await db.execute("ALTER TABLE messages ADD COLUMN reasoning TEXT NOT NULL DEFAULT ''");
       await createGoalTables(db);
+    }
+    if (from < 3) {
+      // v3:聊天加会话维度;目标值改成可空;新增提醒表。
+      //
+      // 老数据不能丢:把所有历史消息归进一个"以前的对话"会话,
+      // 而不是删掉或者留着一条混在一起的历史。
+      //
+      // 注意 messages 表在 v1/v2 就存在了,所以这里只建 conversations、
+      // 给 messages 补一列,不能整个重建(会撞 "table messages already exists")。
+      await createConversationTable(db);
+      await db.execute(
+        'ALTER TABLE messages ADD COLUMN conversation_id INTEGER NOT NULL DEFAULT 0',
+      );
+      await db.execute(
+        'CREATE INDEX idx_messages_conversation ON messages(conversation_id)',
+      );
+
+      await db.execute('''
+        INSERT INTO conversations (title, created_at, updated_at)
+        VALUES ('以前的对话', ?, ?)
+      ''', [
+        DateTime.now().millisecondsSinceEpoch,
+        DateTime.now().millisecondsSinceEpoch,
+      ]);
+      final conversationId =
+          Sqflite.firstIntValue(await db.rawQuery('SELECT MAX(id) FROM conversations')) ?? 1;
+      // 旧消息的 conversation_id 都是默认值 0,归到刚建的那个会话里。
+      await db.execute(
+        'UPDATE messages SET conversation_id = ? WHERE conversation_id = 0',
+        [conversationId],
+      );
+
+      // target 从 NOT NULL 改成可空:SQLite 不支持改列约束,只能重建这张表。
+      await db.execute('ALTER TABLE goals RENAME TO goals_old');
+      await db.execute('''
+        CREATE TABLE goals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL,
+          unit TEXT NOT NULL DEFAULT '',
+          target REAL,
+          period TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'increase',
+          color TEXT NOT NULL DEFAULT 'blue',
+          active INTEGER NOT NULL DEFAULT 1,
+          start_day TEXT,
+          end_day TEXT,
+          created_at INTEGER NOT NULL
+        )
+      ''');
+      await db.execute('''
+        INSERT INTO goals (id, title, unit, target, period, direction, color, active, start_day, end_day, created_at)
+        SELECT id, title, unit, target, period, direction, color, active, start_day, end_day, created_at
+        FROM goals_old
+      ''');
+      await db.execute('DROP TABLE goals_old');
+
+      await createReminderTable(db);
     }
   }
 
@@ -122,8 +226,10 @@ class AppDatabase {
     await db.delete('tasks');
     await db.delete('journals');
     await db.delete('messages');
+    await db.delete('conversations');
     await db.delete('progress_entries');
     await db.delete('goals');
+    await db.delete('reminders');
   }
 
   Future<void> close() => db.close();

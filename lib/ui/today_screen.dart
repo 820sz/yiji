@@ -205,7 +205,7 @@ class _TodayScreenState extends State<TodayScreen> {
                   bottom: 20,
                   child: FloatingActionButton(
                     onPressed: () => showAddTaskSheet(context),
-                    tooltip: '加待办',
+                    tooltip: '加任务',
                     child: const Icon(Icons.add),
                   ),
                 ),
@@ -503,7 +503,7 @@ class _Header extends StatelessWidget {
                 ),
                 const SizedBox(height: 3),
                 Text(
-                  total == 0 ? '暂无待办' : '$total 条待办 · 完成 $doneCount',
+                  total == 0 ? '暂无任务' : '$total 条任务 · 完成 $doneCount',
                   style: TextStyle(fontSize: 13, color: textSecondary),
                 ),
               ],
@@ -645,7 +645,7 @@ class _EmptyHint extends StatelessWidget {
         children: [
           const BrandMark(size: 56, radius: 16),
           const SizedBox(height: 18),
-          Text('今天还没有待办', style: TextStyle(fontSize: 15, color: textSecondary)),
+          Text('今天还没有任务', style: TextStyle(fontSize: 15, color: textSecondary)),
           const SizedBox(height: 6),
           Text(
             '点右下角加一条',

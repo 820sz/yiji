@@ -125,9 +125,47 @@ class Journal {
 }
 
 /// AI 聊天的一条消息。
+/// 一个会话(聊天侧边栏里的一条)。
+///
+/// 消息必须挂在会话下:否则每次请求都会把历史上所有对话拼进上下文,
+/// AI 就会像"记得"你从没在这个对话里提过的事。
+class Conversation {
+  const Conversation({
+    required this.id,
+    required this.title,
+    required this.createdAt,
+    required this.updatedAt,
+    this.messageCount = 0,
+  });
+
+  final int id;
+
+  /// 会话标题。空串表示还没起名,界面用首条用户消息兜底。
+  final String title;
+
+  final DateTime createdAt;
+  final DateTime updatedAt;
+
+  /// 消息条数,侧边栏用来判断这个会话是不是空的。
+  final int messageCount;
+
+  bool get isEmpty => messageCount == 0;
+
+  factory Conversation.fromMap(Map<String, Object?> map, {int messageCount = 0}) {
+    return Conversation(
+      id: map['id'] as int,
+      title: (map['title'] as String?) ?? '',
+      createdAt: DateTime.fromMillisecondsSinceEpoch(map['created_at'] as int),
+      updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updated_at'] as int),
+      messageCount: messageCount,
+    );
+  }
+}
+
 class ChatMessage {
   const ChatMessage({
     required this.id,
+    required this.conversationId,
     required this.role,
     required this.content,
     required this.createdAt,
@@ -135,6 +173,9 @@ class ChatMessage {
   });
 
   final int id;
+
+  /// 属于哪个会话。发请求时只取本会话的历史。
+  final int conversationId;
 
   /// `user` 或 `assistant`。
   final String role;
@@ -155,6 +196,7 @@ class ChatMessage {
   factory ChatMessage.fromMap(Map<String, Object?> map) {
     return ChatMessage(
       id: map['id'] as int,
+      conversationId: (map['conversation_id'] as int?) ?? 0,
       role: map['role'] as String,
       content: map['content'] as String,
       reasoning: (map['reasoning'] as String?) ?? '',
@@ -163,12 +205,14 @@ class ChatMessage {
   }
 
   static Map<String, Object?> insertMap({
+    required int conversationId,
     required String role,
     required String content,
     required DateTime createdAt,
     String reasoning = '',
   }) {
     return {
+      'conversation_id': conversationId,
       'role': role,
       'content': content,
       'reasoning': reasoning,

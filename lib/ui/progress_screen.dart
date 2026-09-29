@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 import '../data/goals.dart';
@@ -165,7 +167,7 @@ class ProgressScreen extends StatelessWidget {
 
   Future<void> _createGoal(BuildContext context) async {
     final state = AppScope.of(context);
-    final draft = await showModalBottomSheet<_GoalDraft>(
+    final draft = await showModalBottomSheet<GoalDraft>(
       context: context,
       isScrollControlled: true,
       builder: (_) => const _GoalEditorSheet(),
@@ -183,7 +185,7 @@ class ProgressScreen extends StatelessWidget {
 
   Future<void> _editGoal(BuildContext context, Goal goal) async {
     final state = AppScope.of(context);
-    final draft = await showModalBottomSheet<_GoalDraft>(
+    final draft = await showModalBottomSheet<GoalDraft>(
       context: context,
       isScrollControlled: true,
       builder: (_) => _GoalEditorSheet(goal: goal),
@@ -339,25 +341,32 @@ class _GoalCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 2),
-                Row(
-                  children: [
-                    Text(
-                      goal.progressLabel,
-                      style: TextStyle(fontSize: 13, color: textSecondary),
-                    ),
-                    const Spacer(),
-                    Text(
-                      '${(goal.ratio * 100).round()}%',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: goal.reached ? AppTheme.accent : textSecondary,
+                // 有目标值才谈得上"完成多少";没有目标值时就只报已推进的量。
+                if (goal.hasTarget)
+                  Row(
+                    children: [
+                      Text(
+                        goal.progressLabel,
+                        style: TextStyle(fontSize: 13, color: textSecondary),
                       ),
-                    ),
-                  ],
-                ),
+                      const Spacer(),
+                      Text(
+                        '${(goal.ratio * 100).round()}%',
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: goal.reached ? AppTheme.accent : textSecondary,
+                        ),
+                      ),
+                    ],
+                  )
+                else
+                  Text(
+                    goal.progressLabel,
+                    style: TextStyle(fontSize: 13, color: textSecondary),
+                  ),
                 const SizedBox(height: 8),
-                _ProgressBar(ratio: goal.ratio, color: fill, reached: goal.reached),
+                _ProgressBar(goal: goal, color: fill),
                 const SizedBox(height: 7),
                 Row(
                   children: [
@@ -367,9 +376,12 @@ class _GoalCard extends StatelessWidget {
                     ),
                     const Spacer(),
                     Text(
-                      goal.reached
-                          ? '已完成'
-                          : '还差 ${Goal.formatAmount(goal.remaining)} ${goal.unit}',
+                      // 没有目标值时不写"还差多少"——没有终点就没有"还差"。
+                      !goal.hasTarget
+                          ? '未设目标值'
+                          : (goal.reached
+                              ? '已完成'
+                              : '还差 ${Goal.formatAmount(goal.remaining)} ${goal.unit}'),
                       style: TextStyle(fontSize: 12, color: textSecondary),
                     ),
                   ],
@@ -389,16 +401,31 @@ class _GoalCard extends StatelessWidget {
 /// 从旧值滑到新值比直接跳过去更能让人感到"确实往前走了"。
 /// 用 ease-out 而不是线性——结束要收得住。
 class _ProgressBar extends StatelessWidget {
-  const _ProgressBar({required this.ratio, required this.color, required this.reached});
+  const _ProgressBar({required this.goal, required this.color});
 
-  final double ratio;
+  final Goal goal;
   final Color color;
-  final bool reached;
+
+  /// 没有目标值时的推进条填充比例。
+  ///
+  /// 累计量越多、条越长,但**永远不填满**:没有终点就没有"到顶"这回事。
+  /// 用对数增长,这样几十和几千的差距在视觉上都能看出来,
+  /// 而不是第一周就把条填满、后面再也看不出变化。
+  static const _noTargetMaxFill = 0.85;
+
+  double get _fill {
+    if (goal.hasTarget) return goal.ratio;
+    if (goal.current <= 0) return 0;
+    // log(1+current) / (log(1+current)+1):从 0 单调增到 1,前段涨得快、后段放缓。
+    final scaled = log(goal.current + 1) / (log(goal.current + 1) + 1);
+    return (scaled * _noTargetMaxFill).clamp(0.0, _noTargetMaxFill);
+  }
 
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final track = dark ? const Color(0xFF2A2D33) : const Color(0xFFEDEEF1);
+    final fill = _fill;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -416,9 +443,9 @@ class _ProgressBar extends StatelessWidget {
               duration: AppTheme.medium,
               curve: AppTheme.easeOut,
               height: 9,
-              width: (width * ratio).clamp(0.0, width),
+              width: (width * fill).clamp(0.0, width),
               decoration: BoxDecoration(
-                color: reached ? AppTheme.accent : color,
+                color: goal.reached ? AppTheme.accent : color,
                 borderRadius: BorderRadius.circular(5),
               ),
             ),
@@ -907,24 +934,8 @@ class _HistorySheet extends StatelessWidget {
   }
 }
 
-/// 目标编辑器用的草稿值。
-class _GoalDraft {
-  const _GoalDraft({
-    required this.title,
-    required this.unit,
-    required this.target,
-    required this.period,
-    required this.direction,
-    required this.color,
-  });
-
-  final String title;
-  final String unit;
-  final double target;
-  final GoalPeriod period;
-  final GoalDirection direction;
-  final TaskColor color;
-}
+/// 目标编辑器直接复用 `goals.dart` 里的 [GoalDraft]:
+/// 那里同一份结构还用于 AI 拆字段,两处各写一份必然漂开。
 
 /// 新建/编辑目标的表单。
 class _GoalEditorSheet extends StatefulWidget {
@@ -940,7 +951,9 @@ class _GoalEditorSheetState extends State<_GoalEditorSheet> {
   late final _title = TextEditingController(text: widget.goal?.title ?? '');
   late final _unit = TextEditingController(text: widget.goal?.unit ?? '');
   late final _target = TextEditingController(
-    text: widget.goal == null ? '' : Goal.formatAmount(widget.goal!.target),
+    text: widget.goal?.hasTarget == true
+        ? Goal.formatAmount(widget.goal!.target!)
+        : '',
   );
 
   /// 自然语言描述。填完由 AI 拆成下面那些字段。
@@ -987,7 +1000,7 @@ class _GoalEditorSheetState extends State<_GoalEditorSheet> {
       }
       setState(() {
         _title.text = draft.title;
-        _target.text = Goal.formatAmount(draft.target);
+        _target.text = draft.target == null ? '' : Goal.formatAmount(draft.target!);
         _unit.text = draft.unit;
         _period = draft.period;
         _direction = draft.direction;
@@ -1008,17 +1021,52 @@ class _GoalEditorSheetState extends State<_GoalEditorSheet> {
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
     final isEdit = widget.goal != null;
 
-    return SingleChildScrollView(
-      padding: EdgeInsets.only(
-        left: 18,
-        right: 18,
-        top: 18,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 18,
+    // 用 DraggableScrollableSheet 而不是裸的 SingleChildScrollView:
+    // 后者会让内容一路顶到屏幕最上方(字段一多、键盘再一挤就积攒到顶部),
+    // 这个弹层字段不少,必须给它一个固定的、可拖动的容器。
+    return Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.of(context).viewInsets.bottom),
+      child: DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.78,
+        minChildSize: 0.45,
+        maxChildSize: 0.94,
+        builder: (context, scrollController) => Column(
+          children: [
+            // 抓手:让"这是可以往下拖的"看得见。
+            Container(
+              margin: const EdgeInsets.only(top: 10, bottom: 4),
+              width: 38,
+              height: 4,
+              decoration: BoxDecoration(
+                color: textSecondary.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Expanded(
+              child: SingleChildScrollView(
+                controller: scrollController,
+                padding: const EdgeInsets.fromLTRB(18, 10, 18, 18),
+                child: _form(context, isEdit, textPrimary, textSecondary, dark),
+              ),
+            ),
+          ],
+        ),
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
+    );
+  }
+
+  Widget _form(
+    BuildContext context,
+    bool isEdit,
+    Color textPrimary,
+    Color textSecondary,
+    bool dark,
+  ) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
           Text(
             isEdit ? '编辑目标' : '新建目标',
             style: TextStyle(
@@ -1175,16 +1223,18 @@ class _GoalEditorSheetState extends State<_GoalEditorSheet> {
               const SizedBox(width: 8),
               FilledButton(
                 onPressed: () {
+                  // 只有"推进什么"是必填的。目标值留空完全合法——
+                  // 很多事情一开始根本不知道该推进到多少,那时它只是一条推进记录。
+                  if (_title.text.trim().isEmpty) return;
                   final target = double.tryParse(_target.text.trim());
-                  if (_title.text.trim().isEmpty || target == null || target <= 0) {
-                    return;
-                  }
                   Navigator.pop(
                     context,
-                    _GoalDraft(
+                    GoalDraft(
                       title: _title.text.trim(),
-                      unit: _unit.text.trim().isEmpty ? '次' : _unit.text.trim(),
-                      target: target,
+                      // 单位也可以留空。
+                      unit: _unit.text.trim(),
+                      // 目标值为空或非法时传 null,建出来的就是一条纯推进条。
+                      target: (target != null && target > 0) ? target : null,
                       period: _period,
                       direction: _direction,
                       color: _color,
@@ -1202,7 +1252,6 @@ class _GoalEditorSheetState extends State<_GoalEditorSheet> {
             ],
           ),
         ],
-      ),
     );
   }
 }

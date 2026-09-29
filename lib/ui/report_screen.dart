@@ -358,7 +358,7 @@ class _CompletionList extends StatelessWidget {
           padding: EdgeInsets.all(20),
           child: Center(
             child: Text(
-              '这个区间还没有待办记录',
+              '这个区间还没有任务记录',
               style: TextStyle(color: AppTheme.lightTextSecondary),
             ),
           ),

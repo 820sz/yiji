@@ -22,6 +22,8 @@ import '../data/goals.dart';
 import '../data/models.dart';
 import '../data/palette.dart';
 import '../data/record_store.dart';
+import '../data/reminder.dart';
+import '../data/reminder_notifier.dart';
 import '../data/report_service.dart';
 import '../data/sqlite_record_store.dart';
 import '../update/apk_installer.dart';
@@ -43,13 +45,15 @@ class AppState extends ChangeNotifier {
     AiClient? aiClient,
     AppUpdater? updater,
     ApkInstaller installer = const ApkInstaller(),
+    ReminderNotifier? notifier,
   })  : _store = store,
         _reports = reports,
         _settings = settings,
         _ai = aiClient ?? AiClient(),
         _updater = updater ?? AppUpdater(),
         _installer = installer,
-        _matcher = GoalMatcher(aiClient ?? AiClient());
+        _matcher = GoalMatcher(aiClient ?? AiClient()),
+        _notifier = notifier ?? ReminderNotifier();
 
   final RecordStore _store;
   final ReportService _reports;
@@ -58,6 +62,7 @@ class AppState extends ChangeNotifier {
   final AppUpdater _updater;
   final ApkInstaller _installer;
   final GoalMatcher _matcher;
+  final ReminderNotifier _notifier;
 
   // ---------- 今天页 ----------
 
@@ -128,6 +133,21 @@ class AppState extends ChangeNotifier {
   Uint8List? get avatarBytes => _settings.avatarBytes;
   bool get darkMode => _settings.darkMode;
 
+  /// 用户自己的头像(AI 头像旁边那侧)。
+  Uint8List? get userAvatarBytes => _settings.userAvatarBytes;
+
+  /// 身份卡片的自定义背景。
+  Uint8List? get cardBackgroundBytes => _settings.cardBackgroundBytes;
+
+  /// 个性签名。
+  String get bio => _settings.bio;
+
+  /// 身份卡片上显示的 ID。没设过名字时不显示空白,给一个中性称呼。
+  String get identityLabel {
+    final name = _settings.displayName.trim();
+    return name.isEmpty ? '我' : name;
+  }
+
   /// 开屏那句话。
   String get splashText => _settings.splashText;
 
@@ -138,9 +158,15 @@ class AppState extends ChangeNotifier {
   /// 首次进页面时把要用的数据读出来。
   Future<void> bootstrap() async {
     await _loadDay();
-    await _loadChat();
+    // 必须走 loadConversations 而不是 _loadChat:前者会把会话列表也读出来,
+    // 并挑一个有效的当前会话。只读消息的话,重开 app 后侧边栏是空的、
+    // 历史对话也像是丢了。
+    await loadConversations();
     await refreshGoals();
     await loadCalendarMonth(_calendarMonth);
+    // 系统重启或用户清理后定时通知会消失,启动时重排一次。
+    // 失败不影响别的功能(notifier 内部已经把异常吞掉了)。
+    unawaited(syncReminders());
     unawaited(_checkUpdateQuietly());
   }
 
@@ -420,9 +446,45 @@ class AppState extends ChangeNotifier {
   // ---------- 目标与进度 ----------
 
   Future<void> refreshGoals() async {
-    _goals = await _store.goals();
+    // 目标的"当前值"只算**本周期内**的推进量。
+    //
+    // 以前是把所有历史条目加起来,于是"每周跑3次"累积到 20 次之后
+    // 进度条永远满着、再练也不动;"每周"这个周期形同不存在。
+    // 现在每个目标按它自己的周期取区间:周目标看本周,月目标看本月,
+    // 自定义目标看它自己设的起止日期。
+    final today = todayKey();
+    final goals = await _store.goals();
+
+    final totals = <int, double>{};
+    for (final goal in goals) {
+      final (start, end) = _periodRangeOf(goal, today);
+      final entries = await _store.progressEntriesBetween(start, end);
+      totals[goal.id] = entries
+          .where((entry) => entry.goalId == goal.id)
+          .fold(0.0, (sum, entry) => sum + entry.amount);
+    }
+
+    _goals = [
+      for (final goal in goals) goal.copyWithCurrent(totals[goal.id] ?? 0),
+    ];
     await _refreshPendingSync();
     notifyListeners();
+  }
+
+  /// 某个目标在当前时刻对应的统计区间(含首尾)。
+  static (String, String) _periodRangeOf(Goal goal, String today) {
+    switch (goal.period) {
+      case GoalPeriod.weekly:
+        return (mondayOf(today), sundayOf(today));
+      case GoalPeriod.monthly:
+        return (firstDayOfMonth(today), lastDayOfMonth(today));
+      case GoalPeriod.custom:
+        final start = goal.startDay ?? addDays(today, -29);
+        final end = goal.endDay ?? today;
+        // 区间整个已经过去时退回"最近 30 天",否则它会永远显示 0。
+        if (end.compareTo(today) < 0) return (addDays(today, -29), today);
+        return (start, end);
+    }
   }
 
   Future<void> _refreshPendingSync() async {
@@ -435,8 +497,8 @@ class AppState extends ChangeNotifier {
 
   Future<void> createGoal({
     required String title,
-    required String unit,
-    required double target,
+    String unit = '',
+    double? target,
     required GoalPeriod period,
     required GoalDirection direction,
     required TaskColor color,
@@ -656,8 +718,63 @@ class AppState extends ChangeNotifier {
 
   // ---------- 聊天页 ----------
 
+  /// 全部会话,最近活跃的在前。
+  List<Conversation> _conversations = const [];
+  List<Conversation> get conversations => _conversations;
+
+  /// 当前正在聊的会话 id。0 表示还没有任何会话。
+  int _currentConversationId = 0;
+  int get currentConversationId => _currentConversationId;
+
+  /// 当前会话的标题(空串表示还没起名)。
+  String get currentConversationTitle {
+    for (final conversation in _conversations) {
+      if (conversation.id == _currentConversationId) return conversation.title;
+    }
+    return '';
+  }
+
+  /// 载入会话列表,并保证当前会话有效。
+  ///
+  /// 首次打开、或删掉了当前会话时,自动选中最近活跃的那个;
+  /// 一个都没有就什么都不做——第一次发消息时再建。
+  Future<void> loadConversations() async {
+    _conversations = await _store.conversations();
+    final stillExists = _conversations.any((c) => c.id == _currentConversationId);
+    if (!stillExists) {
+      _currentConversationId = _conversations.isEmpty ? 0 : _conversations.first.id;
+    }
+    await _loadChat();
+  }
+
+  /// 切到某个会话。
+  Future<void> openConversation(int id) async {
+    _currentConversationId = id;
+    await _loadChat();
+  }
+
+  /// 开一个新对话。不立刻落库——第一次发消息时才建,免得留下一堆空会话。
+  Future<void> startNewConversation() async {
+    _currentConversationId = 0;
+    _chat = const [];
+    notifyListeners();
+  }
+
+  Future<void> deleteConversation(int id) async {
+    await _store.deleteConversation(id);
+    if (_currentConversationId == id) _currentConversationId = 0;
+    await loadConversations();
+  }
+
+  Future<void> renameConversation(int id, String title) async {
+    await _store.renameConversation(id, title);
+    await loadConversations();
+  }
+
   Future<void> _loadChat() async {
-    _chat = await _store.recentMessages();
+    _chat = _currentConversationId == 0
+        ? const []
+        : await _store.messagesOf(_currentConversationId);
     notifyListeners();
   }
 
@@ -667,6 +784,9 @@ class AppState extends ChangeNotifier {
   /// 相当于他平时"把总结贴给 AI"的动作自动化,范围由他自己选。
   /// [attachments] 是本次带上的图片/文件:图片走多模态,文本文件拼进消息正文。
   /// [thinking] 只影响这一次请求,不动全局设置。
+  ///
+  /// **只发本会话的历史**:以前这里把全局所有消息都拼进上下文,
+  /// 结果是新开的对话能"看到"以前聊过的内容,表现得像无中生有的记忆。
   Stream<AiChunk> sendChat(
     String text, {
     DataRange? range,
@@ -676,12 +796,19 @@ class AppState extends ChangeNotifier {
     final trimmed = text.trim();
     if (trimmed.isEmpty && attachments.isEmpty) return;
 
+    // 首次发消息时才把会话落库;标题先留空,发完用它起名。
+    var conversationId = _currentConversationId;
+    if (conversationId == 0) {
+      conversationId = await _store.createConversation();
+      _currentConversationId = conversationId;
+    }
+
     // 附件也写进消息文本:回看聊天记录时要知道当时发了什么。
     final shown = [
       trimmed,
       for (final file in attachments) file.describe,
     ].where((line) => line.isNotEmpty).join('\n');
-    await _store.addMessage('user', shown);
+    await _store.addMessage(conversationId, 'user', shown);
     await _loadChat();
 
     final images = <String>[
@@ -770,17 +897,78 @@ class AppState extends ChangeNotifier {
     final reasoning = _streamingReasoning.trim();
     _streamingAnswer = '';
     _streamingReasoning = '';
-    if (answer.isEmpty) {
+    if (answer.isEmpty || _currentConversationId == 0) {
       notifyListeners();
       return;
     }
-    await _store.addMessage('assistant', answer, reasoning: reasoning);
-    await _loadChat();
+    await _store.addMessage(
+      _currentConversationId,
+      'assistant',
+      answer,
+      reasoning: reasoning,
+    );
+    // 还没起名的会话用首条用户消息当标题——侧边栏里一堆"新对话"没法分辨。
+    await _autoTitleConversation();
+    await loadConversations();
   }
 
-  Future<void> clearChat() async {
-    await _store.clearMessages();
-    await _loadChat();
+  /// 会话还没标题时,拿首条用户消息命名。
+  Future<void> _autoTitleConversation() async {
+    final id = _currentConversationId;
+    if (id == 0) return;
+    final existing = _conversations.where((c) => c.id == id).firstOrNull;
+    if (existing != null && existing.title.trim().isNotEmpty) return;
+
+    final messages = await _store.messagesOf(id);
+    final firstUser = messages.where((m) => m.isUser).firstOrNull;
+    if (firstUser == null) return;
+
+    // 标题取前 20 个字:够分辨就行,太长在侧边栏里也会被截断。
+    final raw = firstUser.content.replaceAll('\n', ' ').trim();
+    final title = raw.length <= 20 ? raw : '${raw.substring(0, 20)}…';
+    await _store.renameConversation(id, title);
+  }
+
+  // ---------- 提醒 ----------
+
+  /// 某天的提醒。
+  Future<List<Reminder>> remindersOn(String day) => _store.remindersOn(day);
+
+  /// 给某条任务加一个提醒。
+  ///
+  /// 加完立刻重排系统通知:用户设了提醒却要等下次开 app 才生效是不可接受的。
+  Future<void> addReminder({
+    required Task task,
+    required String day,
+    required String at,
+    String note = '',
+  }) async {
+    await _store.addReminder(taskId: task.id, day: day, at: at, note: note);
+    await syncReminders();
+    notifyListeners();
+  }
+
+  Future<void> deleteReminder(int id) async {
+    await _store.deleteReminder(id);
+    await syncReminders();
+    notifyListeners();
+  }
+
+  /// 把未来一周的提醒重新排进系统通知。
+  ///
+  /// 只排未来一段而不是全部:Android 的定时通知数量有限,
+  /// 而且排太远的提醒意义不大(那时 app 早被打开过很多次了)。
+  Future<void> syncReminders() async {
+    final today = todayKey();
+    final upcoming = await _store.remindersBetween(today, addDays(today, 7));
+    await _notifier.sync(upcoming, taskTextOf: await _taskTextIndex());
+  }
+
+  /// 提醒通知的正文要用任务内容,这里一次性把 id→内容 取出来。
+  Future<Map<int, String>> _taskTextIndex() async {
+    final today = todayKey();
+    final tasks = await _store.tasksBetween(addDays(today, -1), addDays(today, 8));
+    return {for (final task in tasks) task.id: task.text};
   }
 
   // ---------- 设置 ----------
@@ -797,6 +985,21 @@ class AppState extends ChangeNotifier {
 
   Future<void> saveAvatar(Uint8List? bytes) async {
     await _settings.saveAvatar(bytes);
+    notifyListeners();
+  }
+
+  Future<void> saveUserAvatar(Uint8List? bytes) async {
+    await _settings.saveUserAvatar(bytes);
+    notifyListeners();
+  }
+
+  Future<void> saveCardBackground(Uint8List? bytes) async {
+    await _settings.saveCardBackground(bytes);
+    notifyListeners();
+  }
+
+  Future<void> saveBio(String text) async {
+    await _settings.saveBio(text);
     notifyListeners();
   }
 

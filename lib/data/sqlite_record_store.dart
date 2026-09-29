@@ -3,6 +3,7 @@ import 'package:sqflite/sqflite.dart';
 import 'goals.dart';
 import 'models.dart';
 import 'palette.dart';
+import 'reminder.dart';
 import 'record_store.dart';
 
 /// [RecordStore] 的 SQLite 实现。安卓上就是这个在用。
@@ -127,14 +128,21 @@ class SqliteRecordStore implements RecordStore {
 
   @override
   Future<void> deleteTask(int id) async {
-    await _db.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    // 连带删掉这条任务的提醒:留着孤儿提醒会在通知栏冒出一条"点进去什么都没有"的消息。
+    await _db.transaction((txn) async {
+      await txn.delete('reminders', where: 'task_id = ?', whereArgs: [id]);
+      await txn.delete('tasks', where: 'id = ?', whereArgs: [id]);
+    });
   }
 
   @override
   Future<void> deleteTasks(List<int> ids) async {
     if (ids.isEmpty) return;
     final placeholders = List.filled(ids.length, '?').join(',');
-    await _db.delete('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
+    await _db.transaction((txn) async {
+      await txn.delete('reminders', where: 'task_id IN ($placeholders)', whereArgs: ids);
+      await txn.delete('tasks', where: 'id IN ($placeholders)', whereArgs: ids);
+    });
   }
 
   @override
@@ -225,27 +233,146 @@ class SqliteRecordStore implements RecordStore {
   // ---------- 聊天记录 ----------
 
   @override
-  Future<List<ChatMessage>> recentMessages({int limit = 200}) async {
-    final rows = await _db.query('messages', orderBy: 'created_at DESC, id DESC', limit: limit);
+  Future<List<Conversation>> conversations() async {
+    // 一次查出每个会话的消息数,避免每个会话一条查询。
+    final counts = await _db.rawQuery(
+      'SELECT conversation_id, COUNT(*) AS n FROM messages GROUP BY conversation_id',
+    );
+    final byConversation = {
+      for (final row in counts)
+        (row['conversation_id'] as num).toInt(): (row['n'] as num).toInt(),
+    };
+
+    final rows = await _db.query('conversations', orderBy: 'updated_at DESC');
+    return rows
+        .map(
+          (row) => Conversation.fromMap(
+            row,
+            messageCount: byConversation[row['id'] as int] ?? 0,
+          ),
+        )
+        .toList();
+  }
+
+  @override
+  Future<int> createConversation({String title = ''}) async {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    return _db.insert('conversations', {
+      'title': title.trim(),
+      'created_at': now,
+      'updated_at': now,
+    });
+  }
+
+  @override
+  Future<void> renameConversation(int id, String title) async {
+    await _db.update(
+      'conversations',
+      {'title': title.trim()},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  @override
+  Future<void> deleteConversation(int id) async {
+    // 消息是会话的从属数据,一起删掉;不留孤儿行。
+    await _db.transaction((txn) async {
+      await txn.delete('messages', where: 'conversation_id = ?', whereArgs: [id]);
+      await txn.delete('conversations', where: 'id = ?', whereArgs: [id]);
+    });
+  }
+
+  @override
+  Future<List<ChatMessage>> messagesOf(int conversationId, {int limit = 200}) async {
+    final rows = await _db.query(
+      'messages',
+      where: 'conversation_id = ?',
+      whereArgs: [conversationId],
+      orderBy: 'created_at DESC, id DESC',
+      limit: limit,
+    );
     return rows.map(ChatMessage.fromMap).toList().reversed.toList();
   }
 
   @override
-  Future<int> addMessage(String role, String content, {String reasoning = ''}) async {
-    return _db.insert(
+  Future<int> addMessage(
+    int conversationId,
+    String role,
+    String content, {
+    String reasoning = '',
+  }) async {
+    final id = await _db.insert(
       'messages',
       ChatMessage.insertMap(
+        conversationId: conversationId,
         role: role,
         content: content,
         reasoning: reasoning,
         createdAt: DateTime.now(),
       ),
     );
+    // 会话的"最近更新"跟着消息走,侧边栏才能按活跃度排序。
+    await _db.update(
+      'conversations',
+      {'updated_at': DateTime.now().millisecondsSinceEpoch},
+      where: 'id = ?',
+      whereArgs: [conversationId],
+    );
+    return id;
+  }
+
+  // ---------- 提醒 ----------
+
+  @override
+  Future<List<Reminder>> remindersOn(String day) async {
+    final rows = await _db.query(
+      'reminders',
+      where: 'day = ?',
+      whereArgs: [day],
+      orderBy: 'at ASC',
+    );
+    return rows.map(Reminder.fromMap).toList();
   }
 
   @override
-  Future<void> clearMessages() async {
-    await _db.delete('messages');
+  Future<List<Reminder>> remindersBetween(String startDay, String endDay) async {
+    final rows = await _db.query(
+      'reminders',
+      where: 'day >= ? AND day <= ?',
+      whereArgs: [startDay, endDay],
+      orderBy: 'day ASC, at ASC',
+    );
+    return rows.map(Reminder.fromMap).toList();
+  }
+
+  @override
+  Future<int> addReminder({
+    required int taskId,
+    required String day,
+    required String at,
+    String note = '',
+  }) async {
+    return _db.insert(
+      'reminders',
+      Reminder.insertMap(
+        taskId: taskId,
+        day: day,
+        at: at,
+        note: note,
+        createdAt: DateTime.now(),
+      ),
+    );
+  }
+
+  @override
+  Future<void> deleteReminder(int id) async {
+    await _db.delete('reminders', where: 'id = ?', whereArgs: [id]);
+  }
+
+  @override
+  Future<void> deleteRemindersOfTask(int taskId) async {
+    await _db.delete('reminders', where: 'task_id = ?', whereArgs: [taskId]);
   }
 
   // ---------- 目标与进度推进条 ----------
@@ -272,8 +399,8 @@ class SqliteRecordStore implements RecordStore {
   @override
   Future<int> addGoal({
     required String title,
-    required String unit,
-    required double target,
+    String unit = '',
+    double? target,
     required GoalPeriod period,
     required GoalDirection direction,
     required TaskColor color,
@@ -283,6 +410,7 @@ class SqliteRecordStore implements RecordStore {
     return _db.insert('goals', {
       'title': title.trim(),
       'unit': unit.trim(),
+      // 可以是 null:不知道要推进到多少时只记推进量。
       'target': target,
       'period': period.name,
       'direction': direction.name,

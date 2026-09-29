@@ -192,24 +192,53 @@ class _DayCell extends StatelessWidget {
 
 /// 日期下方那个状态标记。
 ///
-/// 单独做成组件是为了让"这天有没有安排"这件事有一个可被测试定位的落点,
-/// 而不是埋在日期格子的嵌套结构里。
+/// 三档完成度一眼可辨:
+/// - 全做完 → 勾
+/// - 完成一半以上 → 半勾
+/// - 不到一半 → 叉
+///
+/// 没安排的日子不显示任何标记——日历上不该到处都是符号。
+/// 单独做成组件是为了让这件事有一个可被测试定位的落点。
 class CalendarDayDot extends StatelessWidget {
   const CalendarDayDot({super.key, required this.total, required this.done});
 
   final int total;
   final int done;
 
+  /// 完成率。没有任何安排时返回 0。
+  double get ratio => total == 0 ? 0 : done / total;
+
+  /// 这一天的完成度档次。测试直接断言这个,不去比对图标。
+  DayProgress get progress {
+    if (total == 0) return DayProgress.none;
+    if (done >= total) return DayProgress.all;
+    if (ratio >= 0.5) return DayProgress.half;
+    return DayProgress.few;
+  }
+
   @override
   Widget build(BuildContext context) {
-    if (total == 0) return const SizedBox.shrink();
-    if (total == done) {
-      return Icon(Icons.check, size: 11, color: AppTheme.doneText.withValues(alpha: 0.8));
-    }
-    return Container(
-      width: 5,
-      height: 5,
-      decoration: const BoxDecoration(color: AppTheme.accent, shape: BoxShape.circle),
-    );
+    return switch (progress) {
+      DayProgress.none => const SizedBox.shrink(),
+      DayProgress.all => const Icon(
+          Icons.check,
+          size: 12,
+          color: AppTheme.accent,
+        ),
+      // 半勾:空心勾套一个实心下半部,视觉上就是"勾了一半"。
+      DayProgress.half => const Icon(
+          Icons.check_circle_outline,
+          size: 12,
+          color: AppTheme.doneText,
+        ),
+      DayProgress.few => Icon(
+          Icons.close,
+          size: 12,
+          color: AppTheme.doneText.withValues(alpha: 0.75),
+        ),
+    };
   }
 }
+
+/// 一天的完成度档次。
+enum DayProgress { none, all, half, few }

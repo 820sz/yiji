@@ -93,7 +93,7 @@ void main() {
       expect(result.single.amount, 3000);
     });
 
-    test('没有数字的待办不该被硬算进进度', () async {
+    test('没有数字、也不是"做一次算一个单位"的,不该硬算进进度', () async {
       final result = await matcher.match(
         config: config,
         goals: [writingGoal()],
@@ -104,9 +104,35 @@ void main() {
         ],
       );
 
-      // 这三条都没有数量,正确答案是"一条都不匹配"。
-      // 这条断言就是在防"模型为了完成任务硬凑数字"——那是这个功能最容易坏的地方。
+      // 目标是"每周1万字":这三条都没写多少字,正确答案是一条都不匹配。
+      // 这条断言防的是"模型为了完成任务硬凑数字"。
       expect(result, isEmpty);
+    });
+
+    test('做一次就算一个单位的,即使没写数量也要算进去', () async {
+      // 目标是"每周5次力量训练",待办只写"健身(胸+三头)"没写数量——
+      // 这种情况必须算 1 次,否则用户设的进度条永远不会动。
+      final strength = Goal(
+        id: 3,
+        title: '力量训练',
+        unit: '次',
+        target: 5,
+        current: 0,
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.green,
+        active: true,
+        createdAt: DateTime(2026, 9, 25),
+      );
+      final result = await matcher.match(
+        config: config,
+        goals: [strength],
+        tasks: [doneTask(1, '下午 健身(胸+三头)')],
+      );
+
+      expect(result, hasLength(1));
+      expect(result.single.goalId, 3);
+      expect(result.single.amount, 1);
     });
 
     test('无关的事不会被算进来', () async {

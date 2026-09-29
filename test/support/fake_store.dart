@@ -1,7 +1,9 @@
+import 'package:yiji/core/day.dart';
 import 'package:yiji/data/goals.dart';
 import 'package:yiji/data/models.dart';
 import 'package:yiji/data/palette.dart';
 import 'package:yiji/data/record_store.dart';
+import 'package:yiji/data/reminder.dart';
 
 /// 内存版存储,只给测试用。
 ///
@@ -12,10 +14,46 @@ class FakeStore implements RecordStore {
   final List<Task> _tasks = [];
   final Map<String, String> _journals = {};
   final List<ChatMessage> _messages = [];
+  final List<Conversation> _conversations = [];
+  final List<Reminder> _reminders = [];
   final List<Goal> _goals = [];
   final List<ProgressEntry> _entries = [];
 
   int _nextId = 1;
+
+  /// 直接塞一条聊天消息(搭建测试场景用)。
+  ///
+  /// 不传 [conversationId] 时自动用第一个会话,没有就建一个——
+  /// 测试里绝大多数场景只关心"消息内容",不该被会话管理绊住。
+  ChatMessage seedMessage(
+    String role,
+    String content, {
+    int? conversationId,
+    String reasoning = '',
+  }) {
+    final target = conversationId ?? _conversations.firstOrNull?.id ?? 1;
+    if (_conversations.isEmpty) {
+      _conversations.add(
+        Conversation(
+          id: target,
+          title: '',
+          createdAt: DateTime(2026, 9, 14, 22, 0),
+          updatedAt: DateTime(2026, 9, 14, 22, 0),
+        ),
+      );
+    }
+    final id = _nextId++;
+    final message = ChatMessage(
+      id: id,
+      conversationId: target,
+      role: role,
+      content: content,
+      reasoning: reasoning,
+      createdAt: DateTime(2026, 9, 14, 22, 0).add(Duration(seconds: id)),
+    );
+    _messages.add(message);
+    return message;
+  }
 
   /// 直接塞一条已存在的待办(搭建测试场景用)。
   Task seedTask(
@@ -43,6 +81,9 @@ class FakeStore implements RecordStore {
   void seedJournal(String day, String text) => _journals[day] = text;
 
   /// 直接塞一个目标和它的进度(搭测试场景用)。
+  ///
+  /// [current] 对应的进度条目记在**今天**,因为目标的当前值只统计本周期内的推进量:
+  /// 写在写死的旧日期上会被周期过滤掉,测试就会莫名其妙地看到 0。
   Goal seedGoal({
     required String title,
     String unit = '字',
@@ -52,6 +93,7 @@ class FakeStore implements RecordStore {
     GoalDirection direction = GoalDirection.increase,
     bool active = true,
     TaskColor color = TaskColor.blue,
+    String? entryDay,
   }) {
     final id = _nextId++;
     if (current != 0) {
@@ -60,7 +102,7 @@ class FakeStore implements RecordStore {
           id: _nextId++,
           goalId: id,
           amount: current,
-          day: '2026-09-14',
+          day: entryDay ?? todayKey(),
           note: '初始',
           taskId: null,
           source: 'manual',
@@ -266,18 +308,71 @@ class FakeStore implements RecordStore {
   }
 
   @override
-  Future<List<ChatMessage>> recentMessages({int limit = 200}) async {
-    final tail =
-        _messages.length > limit ? _messages.sublist(_messages.length - limit) : _messages;
+  Future<List<Conversation>> conversations() async {
+    return [
+      for (final conversation in _conversations.reversed)
+        Conversation(
+          id: conversation.id,
+          title: conversation.title,
+          createdAt: conversation.createdAt,
+          updatedAt: conversation.updatedAt,
+          messageCount: _messages.where((m) => m.conversationId == conversation.id).length,
+        ),
+    ];
+  }
+
+  @override
+  Future<int> createConversation({String title = ''}) async {
+    final id = _nextId++;
+    _conversations.add(
+      Conversation(
+        id: id,
+        title: title,
+        createdAt: DateTime(2026, 9, 14, 22, 0),
+        updatedAt: DateTime(2026, 9, 14, 22, 0),
+      ),
+    );
+    return id;
+  }
+
+  @override
+  Future<void> renameConversation(int id, String title) async {
+    final index = _conversations.indexWhere((c) => c.id == id);
+    if (index < 0) return;
+    final old = _conversations[index];
+    _conversations[index] = Conversation(
+      id: old.id,
+      title: title.trim(),
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+    );
+  }
+
+  @override
+  Future<void> deleteConversation(int id) async {
+    _conversations.removeWhere((c) => c.id == id);
+    _messages.removeWhere((m) => m.conversationId == id);
+  }
+
+  @override
+  Future<List<ChatMessage>> messagesOf(int conversationId, {int limit = 200}) async {
+    final own = _messages.where((m) => m.conversationId == conversationId).toList();
+    final tail = own.length > limit ? own.sublist(own.length - limit) : own;
     return List.of(tail);
   }
 
   @override
-  Future<int> addMessage(String role, String content, {String reasoning = ''}) async {
+  Future<int> addMessage(
+    int conversationId,
+    String role,
+    String content, {
+    String reasoning = '',
+  }) async {
     final id = _nextId++;
     _messages.add(
       ChatMessage(
         id: id,
+        conversationId: conversationId,
         role: role,
         content: content,
         reasoning: reasoning,
@@ -287,8 +382,55 @@ class FakeStore implements RecordStore {
     return id;
   }
 
+  // ---------- 提醒 ----------
+
   @override
-  Future<void> clearMessages() async => _messages.clear();
+  Future<List<Reminder>> remindersOn(String day) async {
+    return _reminders.where((r) => r.day == day).toList()
+      ..sort((a, b) => a.at.compareTo(b.at));
+  }
+
+  @override
+  Future<List<Reminder>> remindersBetween(String startDay, String endDay) async {
+    return _reminders
+        .where((r) => r.day.compareTo(startDay) >= 0 && r.day.compareTo(endDay) <= 0)
+        .toList()
+      ..sort((a, b) {
+        final byDay = a.day.compareTo(b.day);
+        return byDay != 0 ? byDay : a.at.compareTo(b.at);
+      });
+  }
+
+  @override
+  Future<int> addReminder({
+    required int taskId,
+    required String day,
+    required String at,
+    String note = '',
+  }) async {
+    final id = _nextId++;
+    _reminders.add(
+      Reminder(
+        id: id,
+        taskId: taskId,
+        day: day,
+        at: at,
+        note: note,
+        createdAt: DateTime(2026, 9, 14, 20, 0),
+      ),
+    );
+    return id;
+  }
+
+  @override
+  Future<void> deleteReminder(int id) async {
+    _reminders.removeWhere((r) => r.id == id);
+  }
+
+  @override
+  Future<void> deleteRemindersOfTask(int taskId) async {
+    _reminders.removeWhere((r) => r.taskId == taskId);
+  }
 
   @override
   Future<List<Goal>> goals() async {
@@ -298,8 +440,8 @@ class FakeStore implements RecordStore {
   @override
   Future<int> addGoal({
     required String title,
-    required String unit,
-    required double target,
+    String unit = '',
+    double? target,
     required GoalPeriod period,
     required GoalDirection direction,
     required TaskColor color,

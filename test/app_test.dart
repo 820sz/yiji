@@ -88,20 +88,20 @@ void main() {
 
       expect(find.text('早上 码字1h半'), findsOneWidget);
       expect(find.text('下午下课 健身'), findsOneWidget);
-      expect(find.text('3 条待办 · 完成 1'), findsOneWidget);
+      expect(find.text('3 条任务 · 完成 1'), findsOneWidget);
     });
 
     testWidgets('点右边圆圈就变成已完成', (tester) async {
       store.seedTask(today, '下午下课 健身');
       await pumpApp(tester);
 
-      expect(find.text('1 条待办 · 完成 0'), findsOneWidget);
+      expect(find.text('1 条任务 · 完成 0'), findsOneWidget);
 
       // 打钩点的是右边的圆圈,不是文字——点文字是进编辑。
       await tester.tap(find.byIcon(Icons.radio_button_unchecked));
       await tester.pumpAndSettle();
 
-      expect(find.text('1 条待办 · 完成 1'), findsOneWidget);
+      expect(find.text('1 条任务 · 完成 1'), findsOneWidget);
       final text = tester.widget<Text>(find.text('下午下课 健身'));
       expect(text.style?.decoration, TextDecoration.lineThrough);
     });
@@ -136,13 +136,13 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('要删的待办'), findsNothing);
-      expect(find.text('今天还没有待办'), findsOneWidget);
+      expect(find.text('今天还没有任务'), findsOneWidget);
     });
 
     testWidgets('没有待办时给出下一步提示,而不是空白', (tester) async {
       await pumpApp(tester);
 
-      expect(find.text('今天还没有待办'), findsOneWidget);
+      expect(find.text('今天还没有任务'), findsOneWidget);
       expect(find.text('点右下角加一条'), findsOneWidget);
     });
 
@@ -188,7 +188,7 @@ void main() {
       expect(find.text('早上 码字1h半'), findsOneWidget);
       expect(find.text('上午 码完字 读《人物》'), findsOneWidget);
       expect(find.text('下午下课 健身'), findsOneWidget);
-      expect(find.text('3 条待办 · 完成 0'), findsOneWidget);
+      expect(find.text('3 条任务 · 完成 0'), findsOneWidget);
     });
 
     testWidgets('写过的想法显示在卡片上', (tester) async {
@@ -291,6 +291,9 @@ void main() {
       await tester.enterText(find.byType(TextField).at(1), '英语精读');
       await tester.enterText(find.byType(TextField).at(2), '20');
       await tester.enterText(find.byType(TextField).at(3), '篇');
+      // 表单在可滚动容器里,小窗口下按钮可能在屏幕外。
+      await tester.ensureVisible(find.text('建好'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('建好'));
       await tester.pumpAndSettle();
 
@@ -317,6 +320,8 @@ void main() {
 
       await tester.enterText(find.byType(TextField).first, '每周跑3次');
       // 弹层里的那个;背后进度页的同步按钮也有同款图标。
+      await tester.ensureVisible(find.byIcon(Icons.auto_awesome).last);
+      await tester.pumpAndSettle();
       await tester.tap(find.byIcon(Icons.auto_awesome).last);
       await tester.pumpAndSettle();
 
@@ -326,6 +331,9 @@ void main() {
       expect(find.text('3'), findsOneWidget);
       expect(find.text('次'), findsWidgets);
 
+      // 表单在可滚动容器里,小窗口下按钮可能在屏幕外。
+      await tester.ensureVisible(find.text('建好'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('建好'));
       await tester.pumpAndSettle();
 
@@ -344,12 +352,16 @@ void main() {
       // 只填"推进什么"和"目标值",单位不管。
       await tester.enterText(find.byType(TextField).at(1), '早起');
       await tester.enterText(find.byType(TextField).at(2), '5');
+      // 表单在可滚动容器里,小窗口下按钮可能在屏幕外。
+      await tester.ensureVisible(find.text('建好'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('建好'));
       await tester.pumpAndSettle();
 
       final goal = (await store.goals()).single;
       expect(goal.title, '早起');
-      expect(goal.unit, '次', reason: '留空时给一个兜底单位,而不是建不出来');
+      expect(goal.unit, '', reason: '单位是可选填项,留空就留空,不该硬塞一个单位');
+      expect(goal.target, 5);
     });
 
     testWidgets('手动加进度会推进进度条', (tester) async {
@@ -533,7 +545,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('在吗'), findsOneWidget);
-      expect((await store.recentMessages()).first.content, '在吗');
+      expect((await store.messagesOf(state.currentConversationId)).first.content, '在吗');
     });
 
     testWidgets('能临时改思考强度,不影响全局设置', (tester) async {
@@ -646,7 +658,7 @@ void main() {
   testWidgets('五个页签都能切到,不报错', (tester) async {
     await pumpApp(tester);
 
-    for (final tab in ['日历', '进度', '聊天', '我的', '待办']) {
+    for (final tab in ['日历', '进度', '聊天', '我的', '任务']) {
       await openTab(tester, tab);
       expect(tester.takeException(), isNull);
     }
@@ -743,7 +755,7 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text(SettingsStore.defaultSplashText), findsNothing);
-      expect(find.text('今天还没有待办'), findsOneWidget);
+      expect(find.text('今天还没有任务'), findsOneWidget);
     });
 
     testWidgets('文案可以改成自己的', (tester) async {

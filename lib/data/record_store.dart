@@ -6,6 +6,7 @@ library;
 
 import 'goals.dart';
 import 'models.dart';
+import 'reminder.dart';
 import 'palette.dart';
 
 /// 待办、日记、聊天、目标与进度的读写。
@@ -70,22 +71,57 @@ abstract class RecordStore {
 
   // ---------- 聊天记录 ----------
 
-  /// 最近 [limit] 条聊天消息,按时间升序返回。
-  Future<List<ChatMessage>> recentMessages({int limit});
+  /// 全部会话,最近更新的在前。
+  Future<List<Conversation>> conversations();
 
-  Future<int> addMessage(String role, String content, {String reasoning});
+  /// 新建一个空会话,返回它的 id。
+  Future<int> createConversation({String title});
 
-  Future<void> clearMessages();
+  Future<void> renameConversation(int id, String title);
+
+  /// 删除会话及其全部消息。
+  Future<void> deleteConversation(int id);
+
+  /// 某个会话的消息,按时间升序。
+  Future<List<ChatMessage>> messagesOf(int conversationId, {int limit});
+
+  Future<int> addMessage(
+    int conversationId,
+    String role,
+    String content, {
+    String reasoning,
+  });
+
+  // ---------- 提醒 ----------
+
+  /// 某天的提醒,按时间升序。
+  Future<List<Reminder>> remindersOn(String day);
+
+  /// 区间内的提醒(重排系统通知时用)。
+  Future<List<Reminder>> remindersBetween(String startDay, String endDay);
+
+  Future<int> addReminder({
+    required int taskId,
+    required String day,
+    required String at,
+    String note,
+  });
+
+  Future<void> deleteReminder(int id);
+
+  /// 删掉某条任务的所有提醒(任务被删时调用,避免留下孤儿提醒)。
+  Future<void> deleteRemindersOfTask(int taskId);
 
   // ---------- 目标与进度推进条 ----------
 
   /// 全部目标(含归档),每个都带现算的当前值。
   Future<List<Goal>> goals();
 
+  /// 新建目标。[target] 可空:不知道要推进到多少时只记推进量。
   Future<int> addGoal({
     required String title,
-    required String unit,
-    required double target,
+    String unit,
+    double? target,
     required GoalPeriod period,
     required GoalDirection direction,
     required TaskColor color,

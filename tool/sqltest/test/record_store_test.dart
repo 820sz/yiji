@@ -179,33 +179,152 @@ void main() {
     });
   });
 
-  group('聊天记录', () {
-    test('先落库的排在前面', () async {
-      await store.addMessage('user', '第一条');
-      await store.addMessage('assistant', '第二条');
+  group('会话与聊天记录', () {
+    test('消息按会话隔离', () async {
+      final a = await store.createConversation(title: '会话A');
+      final b = await store.createConversation(title: '会话B');
+      await store.addMessage(a, 'user', 'A 里说的话');
+      await store.addMessage(b, 'user', 'B 里说的话');
 
-      final messages = await store.recentMessages();
-      expect(messages.map((m) => m.content), ['第一条', '第二条']);
-      expect(messages.first.isUser, isTrue);
-      expect(messages.last.isUser, isFalse);
+      // 这是修"AI 无中生有记忆"的核心:两个会话互不可见。
+      expect((await store.messagesOf(a)).map((m) => m.content), ['A 里说的话']);
+      expect((await store.messagesOf(b)).map((m) => m.content), ['B 里说的话']);
     });
 
-    test('只保留最近 N 条,但仍是升序', () async {
+    test('会话列表带消息数,并按最近活跃排序', () async {
+      final a = await store.createConversation(title: '先建的');
+      final b = await store.createConversation(title: '后建的');
+      await store.addMessage(a, 'user', '给 A 发一条');
+
+      final list = await store.conversations();
+      expect(list.first.id, a, reason: '刚发过消息的会话应该排前面');
+      expect(list.first.messageCount, 1);
+      expect(list.firstWhere((c) => c.id == b).messageCount, 0);
+    });
+
+    test('会话内消息按时间升序', () async {
+      final id = await store.createConversation();
+      await store.addMessage(id, 'user', '第一条');
+      await store.addMessage(id, 'assistant', '第二条');
+      await store.addMessage(id, 'user', '第三条');
+
+      final messages = await store.messagesOf(id);
+      expect(messages.map((m) => m.content), ['第一条', '第二条', '第三条']);
+      expect(messages.map((m) => m.role), ['user', 'assistant', 'user']);
+    });
+
+    test('只取最近 N 条,但仍是升序', () async {
+      final id = await store.createConversation();
       for (var i = 1; i <= 5; i++) {
-        await store.addMessage('user', '第$i条');
+        await store.addMessage(id, 'user', '第$i条');
       }
-      final messages = await store.recentMessages(limit: 3);
+      final messages = await store.messagesOf(id, limit: 3);
       expect(messages.map((m) => m.content), ['第3条', '第4条', '第5条']);
     });
 
-    test('清空只删对话', () async {
-      await store.addTask('2026-09-14', '保留的待办');
-      await store.addMessage('user', '删掉的对话');
+    test('改标题', () async {
+      final id = await store.createConversation();
+      await store.renameConversation(id, '新名字');
+      expect((await store.conversations()).single.title, '新名字');
+    });
 
-      await store.clearMessages();
+    test('删会话会连消息一起删,但不影响别的会话', () async {
+      final a = await store.createConversation(title: '要删的');
+      final b = await store.createConversation(title: '留着的');
+      await store.addMessage(a, 'user', '要删的消息');
+      await store.addMessage(b, 'user', '留着的消息');
 
-      expect(await store.recentMessages(), isEmpty);
+      await store.deleteConversation(a);
+
+      final left = await store.conversations();
+      expect(left.map((c) => c.id), [b]);
+      expect(await store.messagesOf(a), isEmpty);
+      expect(await store.messagesOf(b), hasLength(1));
+    });
+
+    test('删会话不会碰到任务', () async {
+      await store.addTask('2026-09-14', '保留的任务');
+      final id = await store.createConversation();
+      await store.addMessage(id, 'user', '删掉的对话');
+
+      await store.deleteConversation(id);
+
       expect(await store.tasksOfDay('2026-09-14'), hasLength(1));
+    });
+
+    test('思考过程跟着消息一起存', () async {
+      final id = await store.createConversation();
+      await store.addMessage(id, 'assistant', '回答', reasoning: '先看数据再回答');
+      final message = (await store.messagesOf(id)).single;
+      expect(message.reasoning, '先看数据再回答');
+      expect(message.hasReasoning, isTrue);
+    });
+  });
+
+  group('提醒', () {
+    test('按天查,并按时间升序', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '20:00');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '08:30');
+      await store.addReminder(taskId: task, day: '2026-09-15', at: '09:00');
+
+      final today = await store.remindersOn('2026-09-14');
+      expect(today.map((r) => r.at), ['08:30', '20:00']);
+    });
+
+    test('区间查询覆盖多天', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '08:00');
+      await store.addReminder(taskId: task, day: '2026-09-20', at: '08:00');
+      await store.addReminder(taskId: task, day: '2026-09-21', at: '08:00');
+
+      final week = await store.remindersBetween('2026-09-14', '2026-09-20');
+      expect(week.map((r) => r.day), ['2026-09-14', '2026-09-20']);
+    });
+
+    test('提醒时刻解析正确', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '07:05');
+
+      final reminder = (await store.remindersOn('2026-09-14')).single;
+      expect(reminder.when, DateTime(2026, 9, 14, 7, 5));
+    });
+
+    test('坏掉的时间字符串不会抛异常', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '不是时间');
+
+      // 回退到当天 9 点,而不是崩掉。
+      final reminder = (await store.remindersOn('2026-09-14')).single;
+      expect(reminder.when, DateTime(2026, 9, 14, 9));
+    });
+
+    test('删任务会连带删掉它的提醒', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      await store.addReminder(taskId: task, day: '2026-09-14', at: '08:00');
+
+      await store.deleteTask(task);
+
+      // 留着孤儿提醒会在通知栏冒出一条"点进去什么都没有"的消息。
+      expect(await store.remindersOn('2026-09-14'), isEmpty);
+    });
+
+    test('批量删任务也会清掉提醒', () async {
+      final a = await store.addTask('2026-09-14', '甲');
+      final b = await store.addTask('2026-09-14', '乙');
+      await store.addReminder(taskId: a, day: '2026-09-14', at: '08:00');
+      await store.addReminder(taskId: b, day: '2026-09-14', at: '09:00');
+
+      await store.deleteTasks([a, b]);
+
+      expect(await store.remindersOn('2026-09-14'), isEmpty);
+    });
+
+    test('单独删一条提醒', () async {
+      final task = await store.addTask('2026-09-14', '要做的事');
+      final id = await store.addReminder(taskId: task, day: '2026-09-14', at: '08:00');
+      await store.deleteReminder(id);
+      expect(await store.remindersOn('2026-09-14'), isEmpty);
     });
   });
 
@@ -639,23 +758,7 @@ void main() {
     });
   });
 
-  group('聊天记录带思考过程', () {
-    test('思考内容会被存下来', () async {
-      await store.addMessage('assistant', '回答', reasoning: '先看数据再回答');
-
-      final message = (await store.recentMessages()).single;
-      expect(message.content, '回答');
-      expect(message.reasoning, '先看数据再回答');
-      expect(message.hasReasoning, isTrue);
-    });
-
-    test('没传思考内容时为空串,不算有思考', () async {
-      await store.addMessage('user', '在吗');
-      expect((await store.recentMessages()).single.hasReasoning, isFalse);
-    });
-  });
-
-  group('v1 升级到 v2 不丢数据', () {
+  group('v1 升级到 v3 不丢数据', () {
     /// 按 v1 的表结构建库并塞一条数据,然后用**生产侧的 open()** 打开它,
     /// 走真实的 onUpgrade 路径。
     ///
@@ -722,9 +825,16 @@ void main() {
       expect(tasks.single.color, TaskColor.blue);
 
       expect((await migrated.journalOfDay('2026-09-14'))!.text, '旧版本写的想法');
-      final message = (await migrated.recentMessages()).single;
+
+      // 老的聊天消息被归进一个"以前的对话"会话,而不是丢掉或者继续混在一起。
+      final conversations = await migrated.conversations();
+      expect(conversations, hasLength(1));
+      expect(conversations.single.title, '以前的对话');
+      final message = (await migrated.messagesOf(conversations.single.id)).single;
       expect(message.content, '旧版本的回复');
       expect(message.reasoning, '');
+      // 会话归属被正确写上,不是 0(那样等于没有归属)。
+      expect(message.conversationId, conversations.single.id);
 
       // 新表可用。
       await migrated.addGoal(

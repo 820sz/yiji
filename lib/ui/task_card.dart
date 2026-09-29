@@ -116,6 +116,7 @@ class TaskCard extends StatelessWidget {
                     child: _DoneMark(
                       done: task.done,
                       foreground: foreground,
+                      dark: dark,
                       // 打钩与文字分开命中:点圈只打钩,点文字进编辑。
                       onTap: onToggleDone,
                     ),
@@ -153,28 +154,62 @@ class TaskCard extends StatelessWidget {
 /// [onTap] 只包住这个圆圈,不包整张卡片:点圈是打钩,点文字是编辑,
 /// 两个动作的命中区必须分开,否则用户想改字却把它打上了钩。
 class _DoneMark extends StatelessWidget {
-  const _DoneMark({required this.done, required this.foreground, this.onTap});
+  const _DoneMark({
+    required this.done,
+    required this.foreground,
+    required this.dark,
+    this.onTap,
+  });
 
   final bool done;
   final Color foreground;
+  final bool dark;
   final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    final mark = AnimatedSwitcher(
-      duration: AppTheme.fast,
-      switchInCurve: AppTheme.easeOut,
-      switchOutCurve: AppTheme.easeOut,
-      transitionBuilder: (child, animation) => ScaleTransition(
-        // 从 0.9 而不是 0 开始:没有东西是从"无"里出现的。
-        scale: Tween<double>(begin: 0.9, end: 1).animate(animation),
-        child: FadeTransition(opacity: animation, child: child),
-      ),
-      child: Icon(
-        done ? Icons.check_circle : Icons.radio_button_unchecked,
-        key: ValueKey(done),
-        size: 22,
-        color: done ? AppTheme.doneText : foreground.withValues(alpha: 0.45),
+    // 打钩的动效分两层:圆圈先被"填满",勾再从中心弹出来。
+    // 只用图标切换会显得很突然——用户点了一下,东西直接换了,
+    // 没有"我正在把它标记成完成"这个过程的反馈。
+    final mark = SizedBox(
+      width: 22,
+      height: 22,
+      child: AnimatedSwitcher(
+        duration: AppTheme.fast,
+        switchInCurve: AppTheme.easeOut,
+        switchOutCurve: AppTheme.easeOut,
+        transitionBuilder: (child, animation) => ScaleTransition(
+          // 从 0.9 而不是 0 开始:没有东西是从"无"里出现的。
+          scale: Tween<double>(begin: 0.9, end: 1).animate(animation),
+          child: FadeTransition(opacity: animation, child: child),
+        ),
+        child: done
+            // 已完成:实心圆 + 白勾。缩放从 0.7 起,做出"盖上去"的感觉。
+            ? TweenAnimationBuilder<double>(
+                key: const ValueKey('done'),
+                tween: Tween(begin: 0.7, end: 1),
+                duration: AppTheme.fast,
+                curve: AppTheme.easeOut,
+                builder: (context, value, child) =>
+                    Transform.scale(scale: value, child: child),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: foreground,
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(
+                    Icons.check,
+                    size: 15,
+                    color: AppTheme.cardFillForContrast(dark),
+                  ),
+                ),
+              )
+            : Icon(
+                Icons.radio_button_unchecked,
+                key: const ValueKey('undone'),
+                size: 22,
+                color: foreground.withValues(alpha: 0.45),
+              ),
       ),
     );
 

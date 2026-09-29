@@ -138,6 +138,11 @@ class AppTheme {
     return dark ? darkCardText : color.onFill;
   }
 
+  /// 已完成卡片上那个"打钩圆点"内部的勾色。
+  ///
+  /// 勾画在深色圆点上,所以要用卡片底色来反衬,而不是跟着文字色走。
+  static Color cardFillForContrast(bool dark) => dark ? darkDoneFill : lightSurface;
+
   /// 深色模式下把淡彩压暗,保持色相但不再刺眼。
   ///
   /// 用 HSL 降亮度而不是简单乘系数:乘系数会让浅黄这类高亮度色压不下去,

@@ -8,6 +8,7 @@ import '../core/day.dart';
 import '../state/app_state.dart';
 import '../update/app_updater.dart';
 import 'ai_avatar.dart';
+import 'identity_card.dart';
 import 'report_screen.dart';
 import 'settings_screen.dart';
 import 'theme.dart';
@@ -35,46 +36,44 @@ class ProfileScreen extends StatelessWidget {
       key: const Key('profile-list'),
       padding: const EdgeInsets.fromLTRB(AppTheme.pagePadding, 8, AppTheme.pagePadding, 120),
       children: [
-        Row(
-          children: [
-            AiAvatar(
-              provider: provider,
-              bytes: state.avatarBytes,
-              dark: dark,
-              size: 54,
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    state.aiConfig.isUsable ? provider.label : '忆记',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                      color: textPrimary,
-                    ),
-                  ),
-                  const SizedBox(height: 3),
-                  Text(
-                    state.aiConfig.isUsable
-                        ? state.aiConfig.model
-                        : '还没配 API key',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: state.aiConfig.isUsable
-                          ? textSecondary
-                          : const Color(0xFFE05252),
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 20),
+        // 先看到"我",而不是 AI 的模型名——这是「我的」页。
+        const IdentityCard(),
         _SectionTitle('AI 助手'),
+        // AI 的身份缩成一行,不再占着整页顶部。
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            children: [
+              AiAvatar(
+                provider: provider,
+                bytes: state.avatarBytes,
+                dark: dark,
+                size: 34,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      state.aiConfig.isUsable ? provider.label : '还没配 API key',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w600,
+                        color: textPrimary,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      state.aiConfig.isUsable ? state.aiConfig.model : '配一个 key 就能聊',
+                      style: TextStyle(fontSize: 12, color: textSecondary),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
         _Tile(
           icon: Icons.vpn_key_outlined,
           title: 'API key 与模型',
@@ -149,7 +148,7 @@ class ProfileScreen extends StatelessWidget {
         _Tile(
           icon: Icons.info_outline,
           title: '忆记',
-          subtitle: state.versionName.isEmpty ? '0.4.0' : state.versionName,
+          subtitle: state.versionName.isEmpty ? '0.5.0' : state.versionName,
           dark: dark,
           // 版本号不该是被点的东西,但也没必要单独占一行小字。
           onTap: () {},

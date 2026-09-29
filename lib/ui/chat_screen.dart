@@ -11,6 +11,7 @@ import '../data/data_range.dart';
 import '../data/models.dart';
 import '../state/app_state.dart';
 import 'ai_avatar.dart';
+import 'chat_sidebar.dart';
 import 'theme.dart';
 
 /// 聊天页:一个配了自己 API key 的对话窗口。
@@ -27,6 +28,9 @@ class ChatScreen extends StatefulWidget {
 }
 
 class _ChatScreenState extends State<ChatScreen> {
+  /// 侧边栏要从头部那个按钮打开,所以需要 Scaffold 的句柄。
+  final _scaffoldKey = GlobalKey<ScaffoldState>();
+
   final _input = TextEditingController();
   final _scroll = ScrollController();
 
@@ -50,9 +54,21 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 挑到不支持的二进制类型时明说,而不是悄悄发出去让模型看见乱码。
   Future<void> _pickFiles({required bool imagesOnly}) async {
     // 这个版本的 pickFiles 默认支持多选,没有 allowMultiple 参数。
-    final files = await FilePicker.pickFiles(
-      type: imagesOnly ? FileType.image : FileType.any,
-    );
+    //
+    // 整段包在 try 里:系统选择器可能因为权限、缺少可处理的应用等原因抛异常,
+    // 不接住的话用户看到的就是"点了没反应"——最难排查的那种坏法。
+    final List<PlatformFile> files;
+    try {
+      files = await FilePicker.pickFiles(
+        type: imagesOnly ? FileType.image : FileType.any,
+      );
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('打不开选择器:$error')),
+      );
+      return;
+    }
     if (files.isEmpty || !mounted) return;
 
     final added = <ChatAttachment>[];
@@ -75,9 +91,17 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     if (!mounted) return;
     setState(() => _attachments.addAll(added));
-    if (rejected.isNotEmpty) {
+    if (added.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('这些读不了:${rejected.join('、')}')),
+        SnackBar(
+          content: Text(
+            rejected.isEmpty ? '没选到文件' : '这些读不了:${rejected.join('、')}',
+          ),
+        ),
+      );
+    } else if (rejected.isNotEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('加了 ${added.length} 个,这些读不了:${rejected.join('、')}')),
       );
     }
   }
@@ -203,7 +227,10 @@ class _ChatScreenState extends State<ChatScreen> {
         ],
       ),
     );
-    if (confirmed ?? false) await state.clearChat();
+    if (confirmed ?? false) {
+      // 清空 = 删掉当前会话(连同它的消息)。会话列表会重新加载。
+      await state.deleteConversation(state.currentConversationId);
+    }
   }
 
   /// 选要附带的数据范围:三个常用档 + 自选。
@@ -223,89 +250,103 @@ class _ChatScreenState extends State<ChatScreen> {
     final messages = state.chat;
     final hasKey = state.aiConfig.isUsable;
     final thinking = _overrideThinking ?? state.aiConfig.thinking;
+    // 厂商只算一次:每帧重新推一遍既浪费也会让头像组件的入参变化。
+    final provider = AiProvider.from(
+      model: state.aiConfig.model,
+      baseUrl: state.aiConfig.baseUrl,
+    );
 
-    return Column(
-      children: [
-        _ChatHeader(
-          provider: AiProvider.from(
+    return Scaffold(
+      // 侧边栏挂在这里:会话列表要从左边滑出来,而且不该占着正文的位置。
+      key: _scaffoldKey,
+      backgroundColor: Colors.transparent,
+      drawer: ChatSidebar(onClose: () => Navigator.of(context).maybePop()),
+      body: Column(
+        children: [
+          _ChatHeader(
+            provider: provider,
             model: state.aiConfig.model,
-            baseUrl: state.aiConfig.baseUrl,
-          ),
-          model: state.aiConfig.model,
-          avatar: state.avatarBytes,
-          dark: dark,
-          thinking: thinking,
-          followingSettings: _overrideThinking == null,
-          onPickThinking: (level) => setState(
-            () => _overrideThinking = level == state.aiConfig.thinking ? null : level,
-          ),
-          onClear: messages.isEmpty ? null : _clear,
-        ),
-        Expanded(
-          child: messages.isEmpty && !state.streaming
-              ? _EmptyChat(hasKey: hasKey, dark: dark)
-              : ListView(
-                  controller: _scroll,
-                  padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
-                  children: [
-                    for (final message in messages)
-                      _MessageBlock(
-                        message: message,
-                        provider: AiProvider.from(
-                          model: state.aiConfig.model,
-                          baseUrl: state.aiConfig.baseUrl,
-                        ),
-                        avatar: state.avatarBytes,
-                        dark: dark,
-                      ),
-                    if (state.streaming)
-                      _StreamingBlock(
-                        reasoning: state.streamingReasoning,
-                        answer: state.streamingAnswer,
-                        provider: AiProvider.from(
-                          model: state.aiConfig.model,
-                          baseUrl: state.aiConfig.baseUrl,
-                        ),
-                        avatar: state.avatarBytes,
-                        dark: dark,
-                      ),
-                  ],
-                ),
-        ),
-        if (_error != null)
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
-            child: Row(
-              children: [
-                const Icon(Icons.error_outline, size: 16, color: Color(0xFFE05252)),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: Text(
-                    _error!,
-                    style: const TextStyle(fontSize: 12.5, color: Color(0xFFE05252)),
-                  ),
-                ),
-              ],
+            avatar: state.avatarBytes,
+            dark: dark,
+            thinking: thinking,
+            followingSettings: _overrideThinking == null,
+            onOpenSidebar: () => _scaffoldKey.currentState?.openDrawer(),
+            onPickThinking: (level) => setState(
+              () => _overrideThinking =
+                  level == state.aiConfig.thinking ? null : level,
             ),
+            onClear: messages.isEmpty ? null : _clear,
           ),
-        _Composer(
-          controller: _input,
-          sending: _sending,
-          attachRange: _attachRange,
-          attachments: _attachments,
-          dark: dark,
-          onPickRange: () => _pickRange(),
-          onClearRange: () => setState(() => _attachRange = null),
-          onAttach: _showAttachSheet,
-          onRemoveAttachment: (index) => setState(() => _attachments.removeAt(index)),
-          onSend: _send,
-        ),
-      ],
+          Expanded(
+            child: messages.isEmpty && !state.streaming
+                ? _EmptyChat(hasKey: hasKey, dark: dark)
+                : ListView.builder(
+                    controller: _scroll,
+                    padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
+                    // 流式输出时每帧都会重建这一页。用 builder + key 让已经发出去的消息
+                    // 保持原样,只重建最后那条正在生成的——否则整列气泡每帧重排,
+                    // 看上去就是持续抖动。
+                    itemCount: messages.length + (state.streaming ? 1 : 0),
+                    itemBuilder: (context, index) {
+                      if (index >= messages.length) {
+                        return _StreamingBlock(
+                          key: const ValueKey('streaming'),
+                          reasoning: state.streamingReasoning,
+                          answer: state.streamingAnswer,
+                          provider: provider,
+                          avatar: state.avatarBytes,
+                          dark: dark,
+                        );
+                      }
+                      final message = messages[index];
+                      return _MessageBlock(
+                        // key 让同一批消息在重建时被复用,而不是重新挂载。
+                        key: ValueKey('message-${message.id}'),
+                        message: message,
+                        provider: provider,
+                        avatar: state.avatarBytes,
+                        userAvatar: state.userAvatarBytes,
+                        userName: state.identityLabel,
+                        dark: dark,
+                      );
+                    },
+                  ),
+          ),
+          if (_error != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
+              child: Row(
+                children: [
+                  const Icon(Icons.error_outline, size: 16, color: Color(0xFFE05252)),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      _error!,
+                      style: const TextStyle(fontSize: 12.5, color: Color(0xFFE05252)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          _Composer(
+            controller: _input,
+            sending: _sending,
+            attachRange: _attachRange,
+            attachments: _attachments,
+            dark: dark,
+            onPickRange: () => _pickRange(),
+            onClearRange: () => setState(() => _attachRange = null),
+            onAttach: _showAttachSheet,
+            onRemoveAttachment: (index) => setState(() => _attachments.removeAt(index)),
+            onSend: _send,
+          ),
+        ],
+      ),
     );
   }
 }
 
-/// 聊天页头部:头像 + 模型名 + 思考强度 + 清空。
+/// 聊天页头部:侧边栏入口 + 厂商 + 思考强度 + 清空。
 class _ChatHeader extends StatelessWidget {
   const _ChatHeader({
     required this.provider,
@@ -314,9 +355,12 @@ class _ChatHeader extends StatelessWidget {
     required this.dark,
     required this.thinking,
     required this.followingSettings,
+    required this.onOpenSidebar,
     required this.onPickThinking,
     required this.onClear,
   });
+
+  final VoidCallback onOpenSidebar;
 
   final AiProvider provider;
   final String model;
@@ -336,14 +380,20 @@ class _ChatHeader extends StatelessWidget {
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
 
     return Padding(
-      padding: const EdgeInsets.fromLTRB(AppTheme.pagePadding, 6, 8, 8),
+      padding: const EdgeInsets.fromLTRB(0, 6, 8, 8),
       child: Row(
         children: [
+          // 侧边栏入口放在最左:会话是这一页的"上一层",位置要和它对应。
+          IconButton(
+            onPressed: onOpenSidebar,
+            icon: Icon(Icons.menu, color: textPrimary),
+            tooltip: '全部对话',
+          ),
           AiAvatar(
             provider: provider,
             bytes: avatar,
             dark: dark,
-            size: 36,
+            size: 34,
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -353,7 +403,7 @@ class _ChatHeader extends StatelessWidget {
                 Text(
                   provider.label,
                   style: TextStyle(
-                    fontSize: 19,
+                    fontSize: 18,
                     fontWeight: FontWeight.w700,
                     height: 1.15,
                     color: textPrimary,
@@ -534,15 +584,20 @@ class _RangeSheet extends StatelessWidget {
 /// 一条已落库的消息。带思考过程时,上面挂一个可折叠的思考块。
 class _MessageBlock extends StatelessWidget {
   const _MessageBlock({
+    super.key,
     required this.message,
     required this.provider,
     required this.avatar,
+    required this.userAvatar,
+    required this.userName,
     required this.dark,
   });
 
   final ChatMessage message;
   final AiProvider provider;
   final Uint8List? avatar;
+  final Uint8List? userAvatar;
+  final String userName;
   final bool dark;
 
   @override
@@ -559,6 +614,8 @@ class _MessageBlock extends StatelessWidget {
           dark: dark,
           provider: provider,
           avatar: avatar,
+          userAvatar: userAvatar,
+          userName: userName,
         ),
       ],
     );
@@ -568,6 +625,7 @@ class _MessageBlock extends StatelessWidget {
 /// 正在流式接收的那一条。
 class _StreamingBlock extends StatelessWidget {
   const _StreamingBlock({
+    super.key,
     required this.reasoning,
     required this.answer,
     required this.provider,
@@ -721,7 +779,7 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
   }
 }
 
-/// 一条气泡。用户消息靠右、AI 靠左带头像。
+/// 一条气泡。用户消息靠右、AI 靠左,两侧各带自己的头像。
 class _Bubble extends StatelessWidget {
   const _Bubble({
     required this.text,
@@ -729,6 +787,8 @@ class _Bubble extends StatelessWidget {
     required this.dark,
     required this.provider,
     required this.avatar,
+    this.userAvatar,
+    this.userName = '',
     this.streaming = false,
   });
 
@@ -737,13 +797,19 @@ class _Bubble extends StatelessWidget {
   final bool dark;
   final AiProvider provider;
   final Uint8List? avatar;
+
+  /// 用户自己的头像,只在用户那侧显示。
+  final Uint8List? userAvatar;
+  final String userName;
+
   final bool streaming;
 
   @override
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final maxWidth = MediaQuery.of(context).size.width * 0.74;
+    // 两侧都要放头像,所以气泡可用宽度要比只有一侧时更窄一点。
+    final maxWidth = MediaQuery.of(context).size.width * 0.68;
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
@@ -782,6 +848,11 @@ class _Bubble extends StatelessWidget {
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             ),
+          // 用户那侧的头像放在气泡右边,和 AI 那侧对称。
+          if (isUser) ...[
+            const SizedBox(width: 10),
+            UserAvatar(bytes: userAvatar, name: userName, size: 30),
+          ],
         ],
       ),
     );

@@ -107,7 +107,7 @@ class _HomeShellState extends State<HomeShell> {
           NavigationDestination(
             icon: Icon(Icons.check_circle_outline),
             selectedIcon: Icon(Icons.check_circle),
-            label: '待办',
+            label: '任务',
           ),
           NavigationDestination(
             icon: Icon(Icons.calendar_month_outlined),

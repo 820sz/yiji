@@ -26,8 +26,12 @@ class GoalMatcher {
 
     final goalsBlock = [
       for (var i = 0; i < goals.length; i++)
-        '${i + 1} | ${goals[i].title} | ${Goal.formatAmount(goals[i].target)} '
-            '| ${goals[i].unit} | ${goals[i].period.label}',
+        // 没有目标值的推进条把"目标"写成"未设定":提示词里也说明这一点,
+        // 免得模型把 "-" 当成数字去凑。
+        '${i + 1} | ${goals[i].title} | '
+            '${goals[i].hasTarget ? Goal.formatAmount(goals[i].target!) : '未设定'} '
+            '| ${goals[i].unit.isEmpty ? '(未定)' : goals[i].unit} '
+            '| ${goals[i].period.label}',
     ].join('\n');
     final tasksBlock = [
       for (var i = 0; i < tasks.length; i++) '${i + 1} | ${tasks[i].text}',

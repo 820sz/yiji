@@ -15,6 +15,9 @@ class SettingsStore {
   static const _keyThinking = 'ai_thinking_level';
   static const _keyDisplayName = 'user_display_name';
   static const _keyAvatar = 'ai_avatar_base64';
+  static const _keyUserAvatar = 'user_avatar_base64';
+  static const _keyCardBackground = 'user_card_background_base64';
+  static const _keyBio = 'user_bio';
   static const _keyDarkMode = 'ui_dark_mode';
   static const _keySplashText = 'ui_splash_text';
 
@@ -52,8 +55,29 @@ class SettingsStore {
   ///
   /// 用 base64 存在 SharedPreferences 而不是写真个文件:头像很小(展示时已压到
   /// 256px),省掉文件路径、权限与清理逻辑。
-  Uint8List? get avatarBytes {
-    final encoded = _prefs.getString(_keyAvatar);
+  Uint8List? get avatarBytes => _decode(_prefs.getString(_keyAvatar));
+
+  Future<void> saveAvatar(Uint8List? bytes) => _save(_keyAvatar, bytes);
+
+  /// 用户自己的头像(显示在聊天里自己那侧、以及身份卡片上)。
+  Uint8List? get userAvatarBytes => _decode(_prefs.getString(_keyUserAvatar));
+
+  Future<void> saveUserAvatar(Uint8List? bytes) => _save(_keyUserAvatar, bytes);
+
+  /// 身份卡片上的自定义背景图。
+  Uint8List? get cardBackgroundBytes => _decode(_prefs.getString(_keyCardBackground));
+
+  Future<void> saveCardBackground(Uint8List? bytes) =>
+      _save(_keyCardBackground, bytes);
+
+  /// 个性签名,显示在身份卡片上。
+  String get bio => _prefs.getString(_keyBio) ?? '';
+
+  Future<void> saveBio(String text) async {
+    await _prefs.setString(_keyBio, text.trim());
+  }
+
+  static Uint8List? _decode(String? encoded) {
     if (encoded == null || encoded.isEmpty) return null;
     try {
       return base64Decode(encoded);
@@ -63,12 +87,12 @@ class SettingsStore {
     }
   }
 
-  Future<void> saveAvatar(Uint8List? bytes) async {
+  Future<void> _save(String key, Uint8List? bytes) async {
     if (bytes == null) {
-      await _prefs.remove(_keyAvatar);
+      await _prefs.remove(key);
       return;
     }
-    await _prefs.setString(_keyAvatar, base64Encode(bytes));
+    await _prefs.setString(key, base64Encode(bytes));
   }
 
   /// 深色模式。默认关(浅色,与原子笔记一致)。
