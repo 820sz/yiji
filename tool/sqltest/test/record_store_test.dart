@@ -855,12 +855,137 @@ void main() {
 
       final first = await AppDatabase.open(path: path);
       await first.close();
-      // 第二次打开时 version 已经是 2,不该再跑一遍 ALTER。
+      // 第二次打开时 version 已经是最终版,不该再跑一遍 ALTER。
       final second = await AppDatabase.open(path: path);
       final store2 = SqliteRecordStore(second.db);
       await store2.addTask('2026-09-14', '能写就行');
       expect((await store2.tasksOfDay('2026-09-14')).single.text, '能写就行');
       await second.close();
+    });
+  });
+
+  group('v2 升级到 v3 不丢数据', () {
+    /// 走的是**用户手机上真实的那条路径**:0.4.0 建的是 v2 库,
+    /// 里面已经有 messages 表和 goals 表(NOT NULL 的 target)。
+    ///
+    /// 单独测这一条是因为 v3 的迁移里有"重建 goals 表"和"给已存在的 messages
+    /// 加列"两处容易撞表的地方,而 v1→v3 走的分支和这里不完全一样。
+    test('已有的任务、聊天、目标都还在,并补上会话归属', () async {
+      final dir = await Directory.systemTemp.createTemp('yiji_v2_to_v3');
+      final path = p.join(dir.path, 'yiji.db');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // 第一步:按 v2 的结构建库(v2 = v1 的 schema + color/reasoning/goals)。
+      final old = await databaseFactory.openDatabase(path);
+      await old.execute('''
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL, text TEXT NOT NULL,
+          done INTEGER NOT NULL DEFAULT 0, completed_at INTEGER,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+          color TEXT NOT NULL DEFAULT 'blue'
+        )
+      ''');
+      await old.execute('CREATE INDEX idx_tasks_day ON tasks(day)');
+      await old.execute('''
+        CREATE TABLE journals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL UNIQUE, text TEXT NOT NULL, updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          role TEXT NOT NULL, content TEXT NOT NULL,
+          reasoning TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+      // v2 的 goals:target 是 NOT NULL。
+      await old.execute('''
+        CREATE TABLE goals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL, unit TEXT NOT NULL, target REAL NOT NULL,
+          period TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'increase',
+          color TEXT NOT NULL DEFAULT 'blue', active INTEGER NOT NULL DEFAULT 1,
+          start_day TEXT, end_day TEXT, created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE progress_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          goal_id INTEGER NOT NULL, amount REAL NOT NULL, day TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', task_id INTEGER,
+          source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL
+        )
+      ''');
+
+      await old.insert('tasks', {
+        'day': '2026-09-20',
+        'text': 'v2 时代记的任务',
+        'done': 1,
+        'sort_order': 1,
+        'created_at': DateTime(2026, 9, 20).millisecondsSinceEpoch,
+        'color': 'pink',
+      });
+      await old.insert('messages', {
+        'role': 'user',
+        'content': 'v2 时代聊的话',
+        'created_at': DateTime(2026, 9, 20).millisecondsSinceEpoch,
+      });
+      final goalId = await old.insert('goals', {
+        'title': '小说推进',
+        'unit': '字',
+        'target': 10000,
+        'period': 'weekly',
+        'created_at': DateTime(2026, 9, 20).millisecondsSinceEpoch,
+      });
+      await old.insert('progress_entries', {
+        'goal_id': goalId,
+        'amount': 2000,
+        'day': '2026-09-20',
+        'created_at': DateTime(2026, 9, 20).millisecondsSinceEpoch,
+      });
+      await old.setVersion(2);
+      await old.close();
+
+      // 第二步:用生产的打开方式升级。
+      final upgraded = await AppDatabase.open(path: path);
+      addTearDown(upgraded.close);
+      final migrated = SqliteRecordStore(upgraded.db);
+
+      // 任务还在,配色没丢。
+      final tasks = await migrated.tasksOfDay('2026-09-20');
+      expect(tasks.single.text, 'v2 时代记的任务');
+      expect(tasks.single.color, TaskColor.pink);
+
+      // 老对话被归进"以前的对话",不再是"没有归属"的孤儿消息。
+      final conversations = await migrated.conversations();
+      expect(conversations.single.title, '以前的对话');
+      final message = (await migrated.messagesOf(conversations.single.id)).single;
+      expect(message.content, 'v2 时代聊的话');
+      expect(message.conversationId, conversations.single.id);
+
+      // 老目标的数值和进度都在。
+      final goal = (await migrated.goals()).single;
+      expect(goal.title, '小说推进');
+      expect(goal.target, 10000);
+      expect(goal.current, 2000);
+
+      // 升级后能建"没有目标值"的目标(证明 target 列真的可空了)。
+      await migrated.addGoal(
+        title: '读《义忆》',
+        unit: '页',
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.blue,
+      );
+      final noTarget = (await migrated.goals()).firstWhere((g) => g.title == '读《义忆》');
+      expect(noTarget.target, isNull);
+      expect(noTarget.hasTarget, isFalse);
+
+      // 提醒表也能用。
+      await migrated.addReminder(taskId: tasks.single.id, day: '2026-09-20', at: '08:00');
+      expect(await migrated.remindersOn('2026-09-20'), hasLength(1));
     });
   });
 }
