@@ -15,6 +15,7 @@ import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
 import 'package:yiji/ui/ai_avatar.dart';
 import 'package:yiji/ui/calendar_screen.dart';
+import 'package:yiji/ui/image_cropper.dart';
 import 'package:yiji/ui/task_card.dart';
 import 'package:yiji/ui/theme.dart';
 
@@ -711,23 +712,49 @@ void main() {
 
       // 以前只有一个不显眼的小图标,用户找不到。
       expect(find.byTooltip('换背景图'), findsOneWidget);
-      await tester.tap(find.byTooltip('换背景图'));
-      await tester.pumpAndSettle();
-
-      // 弹层里有选图和恢复默认两条路。
-      expect(find.text('从相册选一张'), findsOneWidget);
+      // 点它会去相册选图;测试环境没有相册,这里只确认入口在、并且是可点的。
+      expect(find.byIcon(Icons.brush_outlined), findsOneWidget);
+      final entry = tester.widget<IconButton>(
+        find.ancestor(
+          of: find.byIcon(Icons.brush_outlined),
+          matching: find.byType(IconButton),
+        ),
+      );
+      expect(entry.onPressed, isNotNull);
     });
 
-    testWidgets('点头像能换头像', (tester) async {
+    testWidgets('点相机角标能换头像', (tester) async {
       await pumpApp(tester);
       await openTab(tester, '我的');
 
-      // 头像上有个相机角标,说明它是可点的。
+      // 头像上有个相机角标,说明它是可点的;点进去是"选图 → 调整"。
       expect(find.byIcon(Icons.photo_camera), findsOneWidget);
-      await tester.tap(find.byIcon(Icons.photo_camera));
+      final button = tester.widget<InkWell>(
+        find
+            .ancestor(
+              of: find.byIcon(Icons.photo_camera),
+              matching: find.byType(InkWell),
+            )
+            .first,
+      );
+      expect(button.onTap, isNotNull);
+    });
+
+    testWidgets('调整图片的页面能缩放、能选形状', (tester) async {
+      // 用户明确说过头像和背景"全都没法调整"。这一条盯着调整页真的在:
+      // 有缩放滑杆、有形状选择、有完成按钮。
+      await tester.pumpWidget(
+        MaterialApp(
+          home: _CropperHost(bytes: _tinyPng()),
+        ),
+      );
+      await tester.tap(find.text('打开'));
       await tester.pumpAndSettle();
 
-      expect(find.text('从相册选一张'), findsOneWidget);
+      expect(find.text('调整图片'), findsOneWidget);
+      expect(find.byType(Slider), findsOneWidget);
+      expect(find.text('形状'), findsOneWidget);
+      expect(find.text('完成'), findsOneWidget);
     });
 
     testWidgets('能保存 key 和称呼', (tester) async {
@@ -1187,8 +1214,40 @@ void main() {
   });
 }
 
-/// 一个假的"选好的文件"。
-///
+/// 一个最小的合法 PNG(1×1 透明),给裁剪页当输入用。
+Uint8List _tinyPng() => Uint8List.fromList(const [
+      0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+      0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+      0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+      0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+      0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+      0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+      0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+      0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+      0x42, 0x60, 0x82,
+    ]);
+
+/// 一个能打开裁剪页的小宿主:裁剪页是 push 出来的,得有 Navigator。
+class _CropperHost extends StatelessWidget {
+  const _CropperHost({required this.bytes});
+
+  final Uint8List bytes;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: Center(
+        child: TextButton(
+          onPressed: () =>
+              showImageCropper(context, bytes: bytes, withShape: true),
+          child: const Text('打开'),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一个假的"选好的文件"。///
 /// 直接用内存字节,不走磁盘:这一组要验的是"选完之后有没有真的发给模型",
 /// 不是插件的取文件逻辑。
 base class _PickedFile extends PlatformFile {

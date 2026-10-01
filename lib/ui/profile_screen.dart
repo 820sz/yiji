@@ -7,6 +7,7 @@ import '../ai/settings_store.dart';
 import '../core/day.dart';
 import '../state/app_state.dart';
 import '../update/app_updater.dart';
+import '../update/release_notes.dart';
 import 'ai_avatar.dart';
 import 'identity_card.dart';
 import 'prompt_dialog.dart';
@@ -137,6 +138,18 @@ class ProfileScreen extends StatelessWidget {
         ),
         const SizedBox(height: 18),
         _SectionTitle('关于'),
+        // 有新版本时,把入口**提到最显眼的位置**并标出来。
+        //
+        // 以前只是"检查更新"那一行的副标题里写着"有新版本 x.x.x"——字很小、
+        // 还混在一排设置项里,用户根本不会注意到,于是只能自己去点。
+        if (state.availableUpdate != null) ...[
+          _UpdateBanner(
+            info: state.availableUpdate!,
+            dark: dark,
+            onTap: () => _installAvailable(context, state.availableUpdate!),
+          ),
+          const SizedBox(height: 12),
+        ],
         _Tile(
           icon: Icons.system_update_alt,
           title: '检查更新',
@@ -169,85 +182,28 @@ class ProfileScreen extends StatelessWidget {
         messenger.showSnackBar(const SnackBar(content: Text('已经是最新版')));
         return;
       }
-      await _showUpdateSheet(context, info);
+      await _installAvailable(context, info);
     } on Exception catch (error) {
       messenger.showSnackBar(SnackBar(content: Text(error.toString())));
     }
   }
 
-  /// 有新版本时问用户装不装。
-  Future<void> _showUpdateSheet(BuildContext context, UpdateInfo info) async {
+  /// 点横幅直接进安装流程(弹确认 + 进度)。
+  Future<void> _installAvailable(BuildContext context, UpdateInfo info) async {
     final state = AppScope.of(context);
+    final highlights = parseReleaseNotes(info.notes);
+    final dark = Theme.of(context).brightness == Brightness.dark;
     final confirmed = await showModalBottomSheet<bool>(
       context: context,
       isScrollControlled: true,
-      builder: (context) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                '有新版本 ${info.versionName}',
-                style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
-              ),
-              if (info.sizeBytes > 0) ...[
-                const SizedBox(height: 4),
-                Text(
-                  '${(info.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
-                  style: const TextStyle(
-                    fontSize: 12.5,
-                    color: AppTheme.lightTextSecondary,
-                  ),
-                ),
-              ],
-              if (info.notes.isNotEmpty) ...[
-                const SizedBox(height: 12),
-                ConstrainedBox(
-                  constraints: const BoxConstraints(maxHeight: 220),
-                  child: SingleChildScrollView(
-                    child: Text(
-                      info.notes,
-                      style: const TextStyle(fontSize: 14, height: 1.6),
-                    ),
-                  ),
-                ),
-              ],
-              const SizedBox(height: 18),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      onPressed: () => Navigator.pop(context, false),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                      ),
-                      child: const Text('以后再说'),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    flex: 2,
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      style: FilledButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(vertical: 13),
-                      ),
-                      child: const Text('下载并安装'),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+      useSafeArea: true,
+      builder: (context) => _UpdateSheetBody(
+        info: info,
+        highlights: highlights,
+        dark: dark,
       ),
     );
     if (confirmed != true || !context.mounted) return;
-
-    // 下载期间留一个**关不掉**的进度弹窗。之前是点了按钮什么都不显示,
-    // 用户只能对着没反应的界面等,失败了也不知道是卡住还是断了。
     await showDialog<void>(
       context: context,
       barrierDismissible: false,
@@ -417,6 +373,197 @@ class _Tile extends StatelessWidget {
       title: Text(title, style: TextStyle(fontSize: 15, color: textPrimary)),
       subtitle: Text(subtitle, style: TextStyle(fontSize: 12.5, color: textSecondary)),
       trailing: Icon(Icons.chevron_right, size: 19, color: textSecondary),
+    );
+  }
+}
+
+/// 有新版本时的横幅。
+///
+/// 存在的理由:更新提醒以前只写在"检查更新"那一行的副标题里,字小又混在
+/// 一排设置项中,用户根本不会注意到,只能自己想起来了手动去点。
+/// 横幅用强调色、带一个「立即更新」按钮,一眼就能看见。
+class _UpdateBanner extends StatelessWidget {
+  const _UpdateBanner({
+    required this.info,
+    required this.dark,
+    required this.onTap,
+  });
+
+  final UpdateInfo info;
+  final bool dark;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final size = info.sizeBytes > 0
+        ? '${(info.sizeBytes / 1024 / 1024).toStringAsFixed(0)} MB'
+        : '';
+    return Material(
+      color: AppTheme.accent.withValues(alpha: dark ? 0.18 : 0.10),
+      borderRadius: BorderRadius.circular(AppTheme.cardRadius),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+          child: Row(
+            children: [
+              Container(
+                padding: const EdgeInsets.all(8),
+                decoration: const BoxDecoration(
+                  color: AppTheme.accent,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.arrow_circle_up,
+                  size: 18,
+                  color: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '可以更新到 ${info.versionName}',
+                      style: const TextStyle(
+                        fontSize: 14.5,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      size.isEmpty ? '点这里下载安装' : '点这里下载安装 · $size',
+                      style: TextStyle(
+                        fontSize: 12.5,
+                        color: dark
+                            ? AppTheme.darkTextSecondary
+                            : AppTheme.lightTextSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, size: 20, color: AppTheme.accent),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 更新说明弹层的正文。
+///
+/// 说明按"摘要 + 最多 5 条要点"排版,而不是把 release 的 markdown 原文倒进去。
+/// 用户反馈过公告"内容不够清晰、排版混乱、不够简洁"——直接贴原文就是这个结果:
+/// 满屏 `##`、`**`、`-`,而且一次十几条,读的人抓不到重点。
+class _UpdateSheetBody extends StatelessWidget {
+  const _UpdateSheetBody({
+    required this.info,
+    required this.highlights,
+    required this.dark,
+  });
+
+  final UpdateInfo info;
+  final UpdateHighlights highlights;
+  final bool dark;
+
+  @override
+  Widget build(BuildContext context) {
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(18, 18, 18, 12),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '有新版本 ${info.versionName}',
+            style: const TextStyle(fontSize: 17, fontWeight: FontWeight.w600),
+          ),
+          if (info.sizeBytes > 0) ...[
+            const SizedBox(height: 4),
+            Text(
+              '${(info.sizeBytes / 1024 / 1024).toStringAsFixed(1)} MB',
+              style: TextStyle(fontSize: 12.5, color: textSecondary),
+            ),
+          ],
+          if (!highlights.isEmpty) ...[
+            const SizedBox(height: 12),
+            if (highlights.summary.isNotEmpty) ...[
+              Text(
+                highlights.summary,
+                style: TextStyle(fontSize: 13.5, height: 1.6, color: textSecondary),
+              ),
+              const SizedBox(height: 10),
+            ],
+            Flexible(
+              child: SingleChildScrollView(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (final bullet in highlights.bullets)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 8),
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Container(
+                                width: 5,
+                                height: 5,
+                                decoration: const BoxDecoration(
+                                  color: AppTheme.accent,
+                                  shape: BoxShape.circle,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Text(
+                                bullet,
+                                style: const TextStyle(fontSize: 14, height: 1.5),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ],
+          const SizedBox(height: 18),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  style: OutlinedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                  ),
+                  child: const Text('以后再说'),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                flex: 2,
+                child: FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  style: FilledButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 13),
+                  ),
+                  child: const Text('下载并安装'),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

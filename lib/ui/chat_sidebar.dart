@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/models.dart';
 import '../state/app_state.dart';
 import 'ai_avatar.dart';
+import 'image_cropper.dart';
 import 'prompt_dialog.dart';
 import 'theme.dart';
 
@@ -238,15 +239,19 @@ class UserAvatar extends StatelessWidget {
     required this.bytes,
     required this.name,
     this.size = 30,
+    this.shape = AvatarShape.circle,
   });
 
   final Uint8List? bytes;
   final String name;
   final double size;
 
+  /// 头像形状。用户可以在调整图片时自己选。
+  final AvatarShape shape;
+
   @override
   Widget build(BuildContext context) {
-    final radius = BorderRadius.circular(size * 0.3);
+    final radius = _radius();
     if (bytes != null) {
       return ClipRRect(
         borderRadius: radius,
@@ -262,6 +267,12 @@ class UserAvatar extends StatelessWidget {
     }
     return _fallback(radius);
   }
+
+  BorderRadius _radius() => switch (shape) {
+        AvatarShape.circle => BorderRadius.circular(size / 2),
+        AvatarShape.rounded => BorderRadius.circular(size * 0.28),
+        AvatarShape.square => BorderRadius.circular(size * 0.08),
+      };
 
   Widget _fallback(BorderRadius radius) {
     final initial = name.trim().isEmpty ? '我' : name.trim().characters.first;

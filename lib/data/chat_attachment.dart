@@ -112,10 +112,12 @@ class ChatAttachment {
 
   /// 拼进消息文本里的样子。
   ///
-  /// 图片行写成 `![图] <引用>`,界面据此把图渲染出来(而不是显示文件名)。
-  /// 文本文件仍然只是标注一下——它的内容本来就跟着发出去了。
+  /// 图片行写成 `![图] <引用>[ | 说明]`,界面据此把图渲染出来(而不是显示文件名),
+  /// **说明**则是给 AI 看的:它看不到图,但要知道用户发的是哪张表情包、
+  /// 表达的是什么情绪——否则它没法接梗,也就谈不上"看懂用户在斗图"。
   String get describe {
     if (!isImage) return '[文件] $name';
-    return imageRef.isEmpty ? '[图片] $name' : '![图] $imageRef';
+    if (imageRef.isEmpty) return '[图片] $name';
+    return '![图] $imageRef${memeCaption.isEmpty ? '' : ' | $memeCaption'}';
   }
 }

@@ -16,6 +16,7 @@ class SettingsStore {
   static const _keyDisplayName = 'user_display_name';
   static const _keyAvatar = 'ai_avatar_base64';
   static const _keyUserAvatar = 'user_avatar_base64';
+  static const _keyUserAvatarShape = 'user_avatar_shape';
   static const _keyCardBackground = 'user_card_background_base64';
   static const _keyBio = 'user_bio';
   static const _keyDarkMode = 'ui_dark_mode';
@@ -63,6 +64,13 @@ class SettingsStore {
   Uint8List? get userAvatarBytes => _decode(_prefs.getString(_keyUserAvatar));
 
   Future<void> saveUserAvatar(Uint8List? bytes) => _save(_keyUserAvatar, bytes);
+
+  /// 用户头像的形状(circle / rounded / square)。
+  String get userAvatarShape => _prefs.getString(_keyUserAvatarShape) ?? 'circle';
+
+  Future<void> saveUserAvatarShape(String shape) async {
+    await _prefs.setString(_keyUserAvatarShape, shape);
+  }
 
   /// 身份卡片上的自定义背景图。
   Uint8List? get cardBackgroundBytes => _decode(_prefs.getString(_keyCardBackground));

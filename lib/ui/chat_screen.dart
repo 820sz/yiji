@@ -15,7 +15,7 @@ import '../data/models.dart';
 import '../state/app_state.dart';
 import 'ai_avatar.dart';
 import 'chat_sidebar.dart';
-import 'identity_card.dart';
+import 'image_cropper.dart';
 import 'meme_sheet.dart';
 import 'theme.dart';
 
@@ -202,17 +202,62 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() => _attachments.add(picked));
   }
 
-  /// 换这个对话的 AI 头像。
+  /// 换这个对话的 AI 头像:选图 → 调整 → 保存。
   Future<void> _editConversationAvatar() async {
     final state = AppScope.of(context);
-    await pickImageInto(
-      context,
-      title: '换这个对话的头像',
-      onPicked: state.saveConversationAvatar,
-      onRemove: state.currentConversationAvatar == null
-          ? null
-          : () => state.saveConversationAvatar(null),
-    );
+    final hasAvatar = state.currentConversationAvatar != null;
+
+    if (hasAvatar) {
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('换一张'),
+                onTap: () => Navigator.pop(context, 'pick'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.restart_alt),
+                title: const Text('恢复默认头像'),
+                onTap: () => Navigator.pop(context, 'remove'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (choice == null || !mounted) return;
+      if (choice == 'remove') {
+        await state.saveConversationAvatar(null);
+        return;
+      }
+    }
+
+    try {
+      final file = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 92,
+      );
+      if (file == null || !mounted) return;
+      final bytes = await file.readAsBytes();
+      if (!mounted) return;
+      final cropped = await showImageCropper(
+        context,
+        bytes: bytes,
+        aspect: 1,
+        withShape: true,
+      );
+      if (cropped == null) return;
+      await state.saveConversationAvatar(cropped.bytes);
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('选图失败:$error')));
+    }
   }
 
   /// 仅对本次对话生效的思考强度;null 表示跟随设置。
@@ -1404,10 +1449,55 @@ class _AttachmentChip extends StatelessWidget {
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
 
+    // 图片/表情包直接显示**缩略图**,不是"图片 xxx.jpg"这种文件名。
+    // 选了图之后要能一眼确认选的是哪张——那正是用户此刻唯一关心的事。
+    if (attachment.isImage) {
+      return Padding(
+        padding: const EdgeInsets.only(right: 8),
+        child: Stack(
+          clipBehavior: Clip.none,
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: SizedBox(
+                width: 62,
+                height: 62,
+                child: _AttachmentThumb(attachment: attachment),
+              ),
+            ),
+            // 右上角的叉,压在图上。命中区撑到 24 才好点。
+            Positioned(
+              right: -6,
+              top: -6,
+              child: InkWell(
+                onTap: onRemove,
+                customBorder: const CircleBorder(),
+                child: Container(
+                  width: 22,
+                  height: 22,
+                  decoration: BoxDecoration(
+                    color: dark ? const Color(0xFF3A3D44) : Colors.white,
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.18),
+                        blurRadius: 4,
+                      ),
+                    ],
+                  ),
+                  child: Icon(Icons.close, size: 14, color: textSecondary),
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Padding(
       padding: const EdgeInsets.only(right: 8),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
           color: surface,
           borderRadius: BorderRadius.circular(10),
@@ -1416,14 +1506,10 @@ class _AttachmentChip extends StatelessWidget {
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(
-              attachment.isImage ? Icons.image_outlined : Icons.description_outlined,
-              size: 15,
-              color: AppTheme.accent,
-            ),
+            Icon(Icons.description_outlined, size: 15, color: AppTheme.accent),
             const SizedBox(width: 6),
             ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 140),
+              constraints: const BoxConstraints(maxWidth: 150),
               child: Text(
                 attachment.name,
                 overflow: TextOverflow.ellipsis,
@@ -1435,14 +1521,68 @@ class _AttachmentChip extends StatelessWidget {
               onTap: onRemove,
               borderRadius: BorderRadius.circular(10),
               child: Padding(
-                padding: const EdgeInsets.all(2),
-                child: Icon(Icons.close, size: 13, color: textSecondary),
+                padding: const EdgeInsets.all(4),
+                child: Icon(Icons.close, size: 14, color: textSecondary),
               ),
             ),
           ],
         ),
       ),
     );
+  }
+}
+
+/// 待发图片的缩略图。
+///
+/// 三种来源都要能画出来:内存里的字节(刚从相册选的)、内置表情包(asset)、
+/// 以及已落盘的本地文件。
+class _AttachmentThumb extends StatelessWidget {
+  const _AttachmentThumb({required this.attachment});
+
+  final ChatAttachment attachment;
+
+  @override
+  Widget build(BuildContext context) {
+    final placeholder = ColoredBox(
+      color: Colors.black12,
+      child: Icon(
+        Icons.image_outlined,
+        size: 20,
+        color: Colors.white.withValues(alpha: 0.8),
+      ),
+    );
+
+    final bytes = attachment.imageBytes;
+    if (bytes != null) {
+      return Image.memory(
+        bytes,
+        fit: BoxFit.cover,
+        gaplessPlayback: true,
+        errorBuilder: (context, error, stack) => placeholder,
+      );
+    }
+    if (attachment.imageRef.startsWith('asset:')) {
+      return Image.asset(
+        'assets/${attachment.imageRef.substring('asset:'.length)}',
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stack) => placeholder,
+      );
+    }
+    if (attachment.imageRef.isNotEmpty) {
+      return FutureBuilder<File?>(
+        future: ChatImages.file(attachment.imageRef),
+        builder: (context, snapshot) {
+          final file = snapshot.data;
+          if (file == null) return placeholder;
+          return Image.file(
+            file,
+            fit: BoxFit.cover,
+            errorBuilder: (context, error, stack) => placeholder,
+          );
+        },
+      );
+    }
+    return placeholder;
   }
 }
 

@@ -32,10 +32,17 @@ class ChatImage {
   static const marker = '![图]';
 
   /// 从消息文本里解析出这一行的图片标记;不是标记行返回 null。
+  ///
+  /// 行尾可以跟一段说明(`![图] asset:... | 被摸头眯眼冒爱心`),那是给 AI 看的:
+  /// 它看不到图,但需要知道用户发的是哪张表情包、什么情绪,不然接不上梗。
   static ChatImage? parse(String line) {
     final trimmed = line.trim();
     if (!trimmed.startsWith(marker)) return null;
-    final ref = trimmed.substring(marker.length).trim();
+    final body = trimmed.substring(marker.length).trim();
+    if (body.isEmpty) return null;
+    // 竖线之后是说明,渲染时用不到,但它必须被容忍(不能当成引用的一部分)。
+    final bar = body.indexOf('|');
+    final ref = (bar < 0 ? body : body.substring(0, bar)).trim();
     return ref.isEmpty ? null : ChatImage(ref: ref);
   }
 }

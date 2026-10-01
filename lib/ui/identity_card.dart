@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../state/app_state.dart';
 import 'chat_sidebar.dart';
+import 'image_cropper.dart';
 import 'prompt_dialog.dart';
 import 'theme.dart';
 
@@ -167,15 +168,41 @@ class IdentityCard extends StatelessWidget {
     if (result != null) await state.saveBio(result);
   }
 
+  /// 换背景:没设过就直接选图;设过则先问是调整还是恢复默认。
+  ///
+  /// "调整"是重选一张再调——把已存的图拿出来调需要额外存原图,
+  /// 而名片背景本来就是低频操作,重选一次的代价远小于为此存两份数据。
   static Future<void> _editBackground(BuildContext context, AppState state) async {
-    await pickImageInto(
-      context,
-      title: '换背景',
-      onPicked: state.saveCardBackground,
-      onRemove: state.cardBackgroundBytes == null
-          ? null
-          : () => state.saveCardBackground(null),
-    );
+    final hasBackground = state.cardBackgroundBytes != null;
+    if (hasBackground) {
+      final choice = await showModalBottomSheet<String>(
+        context: context,
+        builder: (context) => SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: const Icon(Icons.photo_library_outlined),
+                title: const Text('换一张'),
+                onTap: () => Navigator.pop(context, 'pick'),
+              ),
+              ListTile(
+                leading: const Icon(Icons.restart_alt),
+                title: const Text('恢复默认渐变'),
+                onTap: () => Navigator.pop(context, 'remove'),
+              ),
+            ],
+          ),
+        ),
+      );
+      if (choice == null || !context.mounted) return;
+      if (choice == 'remove') {
+        await state.saveCardBackground(null);
+        return;
+      }
+    }
+    if (!context.mounted) return;
+    await _changeBackground(context, state);
   }
 }
 
@@ -211,14 +238,7 @@ class _AvatarButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return InkWell(
-      onTap: () => pickImageInto(
-        context,
-        title: '换头像',
-        onPicked: state.saveUserAvatar,
-        onRemove: state.userAvatarBytes == null
-            ? null
-            : () => state.saveUserAvatar(null),
-      ),
+      onTap: () => _changeAvatar(context, state),
       customBorder: const CircleBorder(),
       child: Stack(
         children: [
@@ -235,6 +255,7 @@ class _AvatarButton extends StatelessWidget {
               bytes: state.userAvatarBytes,
               name: state.identityLabel,
               size: 58,
+              shape: state.userAvatarShape,
             ),
           ),
           // 相机角标:不点它也算点头像,但它让人知道头像是可以换的。
@@ -283,59 +304,64 @@ class _GradientBackdrop extends StatelessWidget {
   }
 }
 
-/// 从相册选一张图,裁成方形后交给 [onPicked]。
+/// 换头像:选图 → 调整(缩放/位置/形状)→ 保存。
 ///
-/// 抽出来是因为头像和背景两处都要用,而"选图 → 压缩 → 存字节 → 错误提示"
-/// 这段逻辑一模一样。三处各写一遍必然会漂。
-Future<void> pickImageInto(
-  BuildContext context, {
-  required String title,
-  required Future<void> Function(Uint8List? bytes) onPicked,
-  VoidCallback? onRemove,
-}) async {
-  final choice = await showModalBottomSheet<String>(
-    context: context,
-    builder: (context) => SafeArea(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          ListTile(
-            leading: const Icon(Icons.photo_library_outlined),
-            title: const Text('从相册选一张'),
-            onTap: () => Navigator.pop(context, 'pick'),
-          ),
-          if (onRemove != null)
-            ListTile(
-              leading: const Icon(Icons.restart_alt),
-              title: const Text('恢复默认'),
-              onTap: () => Navigator.pop(context, 'remove'),
-            ),
-        ],
-      ),
-    ),
+/// 之前只做到"选一张",没有任何调整手段,主体偏了就只能重选——用户明确说过
+/// 头像和背景"全都没法调整"。调整这一步不能省。
+Future<void> _changeAvatar(BuildContext context, AppState state) async {
+  final picked = await _pickFromGallery(context);
+  if (picked == null || !context.mounted) return;
+
+  final cropped = await showImageCropper(
+    context,
+    bytes: picked,
+    aspect: 1,
+    withShape: true,
+    initialShape: state.userAvatarShape,
   );
+  if (cropped == null) return;
+  await state.saveUserAvatar(cropped.bytes);
+  await state.saveUserAvatarShape(cropped.shape);
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context)
+      .showSnackBar(const SnackBar(content: Text('头像已更新')));
+}
 
-  if (choice == 'remove') {
-    onRemove?.call();
-    return;
-  }
-  if (choice != 'pick' || !context.mounted) return;
+/// 换背景图,同样先让用户调好位置。
+Future<void> _changeBackground(BuildContext context, AppState state) async {
+  final picked = await _pickFromGallery(context);
+  if (picked == null || !context.mounted) return;
 
+  final cropped = await showImageCropper(
+    context,
+    bytes: picked,
+    // 名片是宽的,按 16:9 让用户调。
+    aspect: 16 / 9,
+  );
+  if (cropped == null) return;
+  await state.saveCardBackground(cropped.bytes);
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context)
+      .showSnackBar(const SnackBar(content: Text('背景已更新')));
+}
+
+/// 从相册选一张原图字节。用户取消返回 null。
+Future<Uint8List?> _pickFromGallery(BuildContext context) async {
   try {
     final file = await ImagePicker().pickImage(
       source: ImageSource.gallery,
-      // 展示尺寸不大,先让系统压到 1024,省内存也省存储。
-      maxWidth: 1024,
-      maxHeight: 1024,
-      imageQuality: 88,
+      // 不给系统压:压缩会先把边缘裁掉,用户再调就没有余地了。
+      // 真正落盘的尺寸由裁剪页控制。
+      maxWidth: 2400,
+      maxHeight: 2400,
+      imageQuality: 92,
     );
-    if (file == null) return;
-    await onPicked(await file.readAsBytes());
-    if (!context.mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$title成功')));
+    if (file == null) return null;
+    return await file.readAsBytes();
   } on Exception catch (error) {
-    if (!context.mounted) return;
+    if (!context.mounted) return null;
     ScaffoldMessenger.of(context)
         .showSnackBar(SnackBar(content: Text('选图失败:$error')));
+    return null;
   }
 }

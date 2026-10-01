@@ -144,6 +144,8 @@ class ProgressScreen extends StatelessWidget {
     final accepted = await showModalBottomSheet<_ReviewResult>(
       context: context,
       isScrollControlled: true,
+      // 让弹层自己避开状态栏/刘海:有的 ROM 上不加这个,顶部会被遮住。
+      useSafeArea: true,
       builder: (_) => _SuggestionSheet(
         suggestions: state.suggestions,
         newGoals: state.newGoalSuggestions,
@@ -617,30 +619,50 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
 
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
+    // 用 DraggableScrollableSheet 而不是"SafeArea + Column(min) + Flexible"。
+    //
+    // 后者有个必然的坑:Column 取最小高度,里面的 ListView 只受 maxHeight 约束,
+    // 于是条目一多,整个弹层就长到超过屏幕——标题被顶到状态栏底下(用户截图里
+    // "AI 读到的推"被时间和信号遮住就是这么来的),底部的确认按钮也被推出去。
+    // 给定高度 + 内部滚动,标题和按钮就永远在看得见的位置。
+    return DraggableScrollableSheet(
+      expand: false,
+      initialChildSize: 0.75,
+      minChildSize: 0.4,
+      maxChildSize: 0.95,
+      builder: (context, scrollController) => SafeArea(
         child: Column(
-          mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(
-              'AI 读到的推进',
-              style: TextStyle(
-                fontSize: 17,
-                fontWeight: FontWeight.w600,
-                color: textPrimary,
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'AI 读到的推进',
+                    style: TextStyle(
+                      fontSize: 17,
+                      fontWeight: FontWeight.w600,
+                      color: textPrimary,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    '确认后才计入,算错的取消勾选。',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      height: 1.5,
+                      color: textSecondary,
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 4),
-            Text(
-              '确认后才计入,算错的取消勾选。',
-              style: TextStyle(fontSize: 12.5, height: 1.5, color: textSecondary),
-            ),
-            const SizedBox(height: 12),
-            Flexible(
+            Expanded(
               child: ListView(
-                shrinkWrap: true,
+                controller: scrollController,
+                padding: const EdgeInsets.symmetric(horizontal: 16),
                 children: [
                   for (var i = 0; i < widget.suggestions.length; i++)
                     _SuggestionRow(
@@ -659,12 +681,14 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
                       children: [
                         Icon(Icons.add_circle_outline, size: 16, color: textSecondary),
                         const SizedBox(width: 6),
-                        Text(
-                          '这些事还没在追踪,要不要补上?',
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: textPrimary,
+                        Expanded(
+                          child: Text(
+                            '这些事还没在追踪,要不要补上?',
+                            style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: textPrimary,
+                            ),
                           ),
                         ),
                       ],
@@ -688,54 +712,59 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
                 ],
               ),
             ),
-            const SizedBox(height: 12),
-            Row(
-              children: [
-                Expanded(
-                  child: OutlinedButton(
-                    onPressed: () => Navigator.pop(context),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+            // 按钮固定在底部:滚多少内容都不用去找它。
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton(
+                      onPressed: () => Navigator.pop(context),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
+                      child: const Text('都不算'),
                     ),
-                    child: const Text('都不算'),
                   ),
-                ),
-                const SizedBox(width: 10),
-                Expanded(
-                  flex: 2,
-                  child: FilledButton(
-                    onPressed: _total == 0
-                        ? null
-                        : () => Navigator.pop(
-                              context,
-                              _ReviewResult(
-                                matches: [
-                                  for (var i = 0;
-                                      i < widget.suggestions.length;
-                                      i++)
-                                    if (_accepted.contains(i))
-                                      widget.suggestions[i],
-                                ],
-                                newGoals: [
-                                  for (var i = 0; i < widget.newGoals.length; i++)
-                                    if (_acceptedNew.contains(i))
-                                      widget.newGoals[i],
-                                ],
+                  const SizedBox(width: 10),
+                  Expanded(
+                    flex: 2,
+                    child: FilledButton(
+                      onPressed: _total == 0
+                          ? null
+                          : () => Navigator.pop(
+                                context,
+                                _ReviewResult(
+                                  matches: [
+                                    for (var i = 0;
+                                        i < widget.suggestions.length;
+                                        i++)
+                                      if (_accepted.contains(i))
+                                        widget.suggestions[i],
+                                  ],
+                                  newGoals: [
+                                    for (var i = 0;
+                                        i < widget.newGoals.length;
+                                        i++)
+                                      if (_acceptedNew.contains(i))
+                                        widget.newGoals[i],
+                                  ],
+                                ),
                               ),
-                            ),
-                    style: FilledButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 13),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(12),
+                      style: FilledButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 13),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
                       ),
+                      child: Text('确认这 $_total 项'),
                     ),
-                    child: Text('确认这 $_total 项'),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ],
         ),

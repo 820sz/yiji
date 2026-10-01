@@ -26,6 +26,7 @@ import '../data/palette.dart';
 import '../data/record_store.dart';
 import '../data/reminder.dart';
 import '../data/reminder_notifier.dart';
+import '../ui/image_cropper.dart';
 import '../data/report_service.dart';
 import '../data/sqlite_record_store.dart';
 import '../update/apk_installer.dart';
@@ -1261,6 +1262,18 @@ class AppState extends ChangeNotifier {
 
   Future<void> saveUserAvatar(Uint8List? bytes) async {
     await _settings.saveUserAvatar(bytes);
+    notifyListeners();
+  }
+
+  /// 用户头像的形状。跟着头像一起存,换头像时用户可以重新选。
+  AvatarShape get userAvatarShape => switch (_settings.userAvatarShape) {
+        'rounded' => AvatarShape.rounded,
+        'square' => AvatarShape.square,
+        _ => AvatarShape.circle,
+      };
+
+  Future<void> saveUserAvatarShape(AvatarShape shape) async {
+    await _settings.saveUserAvatarShape(shape.name);
     notifyListeners();
   }
 
