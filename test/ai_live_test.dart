@@ -6,6 +6,7 @@ import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/goal_matcher.dart';
 import 'package:yiji/ai/prompts.dart';
 import 'package:yiji/data/goals.dart';
+import 'package:yiji/data/meme_directive.dart';
 import 'package:yiji/data/models.dart';
 import 'package:yiji/data/palette.dart';
 
@@ -21,6 +22,15 @@ import 'package:yiji/data/palette.dart';
 /// ```
 /// 没配 key 时整组自动跳过,不会让日常 `flutter test` 红。
 void main() {
+  // 这里**不能**调 `TestWidgetsFlutterBinding.ensureInitialized()`:
+  // 它会装上 _MockHttpOverrides,把真实网络请求全部拦掉,这一组就变成
+  // "每个都失败"而不是"打真接口"。
+  //
+  // 代价是读不到打包资源(rootBundle 需要绑定)。所以这一组**不依赖
+  // assets/memes/index.json**:表情包目录里有什么图由 chat_image_test 负责
+  // (那边不需要网络,可以放心初始化绑定),这里只验"模型会不会按格式要一张"。
+  const memeTags = 'daily / happy / angry / sad / confused / shy / sleep / surprised / work';
+
   final apiKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
   final baseUrl = Platform.environment['DEEPSEEK_BASE_URL'] ?? AiConfig.defaultBaseUrl;
 
@@ -33,7 +43,11 @@ void main() {
   }
 
   final config = AiConfig(apiKey: apiKey, baseUrl: baseUrl);
-  final matcher = GoalMatcher(AiClient());
+
+  // 惰性创建:测试绑定装了 HttpOverrides,模块顶层 new 一个 HttpClient 会抛
+  // "There is no current invoker"。所以等真正在 test 里用到时再建。
+  GoalMatcher? cachedMatcher;
+  GoalMatcher matcher() => cachedMatcher ??= GoalMatcher(AiClient());
 
   /// 造一个"每周小说推进 1万字"的目标。
   Goal writingGoal() => Goal(
@@ -67,7 +81,7 @@ void main() {
       required List<Goal> goals,
       required List<Task> tasks,
     }) async {
-      final result = await matcher.match(
+      final result = await matcher().match(
         config: config,
         goals: goals,
         tasks: tasks,
@@ -120,6 +134,14 @@ void main() {
 
       // 目标是"每周1万字":这三条都没写多少字,正确答案是一条都不匹配。
       // 这条断言防的是"模型为了完成任务硬凑数字"。
+      //
+      // 失败时把模型给的东西打出来:光看"非空"没法判断它是编了个数字,
+      // 还是把不相干的事算进来了。
+      // ignore: avoid_print
+      print(
+        'DEBUG 硬算检查 → '
+        '${result.map((s) => '${s.taskText}=>${s.goalTitle}+${s.amount}${s.unit}(${s.reason})').toList()}',
+      );
       expect(result, isEmpty);
     });
 
@@ -281,8 +303,142 @@ void main() {
     });
   });
 
-  group('真实 API:周报成稿', () {
-    test('能按「进度/不足/调整方向」的结构出稿', () async {
+  group('真实 API:建议补充新目标', () {
+    test('做完的事没被追踪时,会建议建一个', () async {
+      // 这是 v0.8.0 的新行为:用户常常先做事、后想起来要追踪。
+      final result = await matcher().match(
+        config: config,
+        // 只有一条"码字"的目标,但他这周还在读书。
+        goals: [writingGoal()],
+        tasks: [
+          doneTask(1, '上午 码字2k'),
+          doneTask(2, '晚上 读《人物》30页'),
+          doneTask(3, '中午 读《义忆》20页'),
+        ],
+        suggestNewGoals: true,
+      );
+
+      // ignore: avoid_print
+      print(
+        'DEBUG newGoals → '
+        '${result.newGoals.map((s) => '${s.title}/${s.unit}(来自:${s.taskText})').toList()}',
+      );
+
+      expect(
+        result.newGoals,
+        isNotEmpty,
+        reason: '他读了两天书却没有"读书"这条推进条,应该被建议补上',
+      );
+      final reading = result.newGoals.firstWhere(
+        (s) => s.title.contains('读'),
+        orElse: () => result.newGoals.first,
+      );
+      expect(reading.title.trim(), isNotEmpty);
+    });
+
+    test('一次性的小事不会被建议建目标', () async {
+      // 否则用户每次同步都会收到一堆"要不要建目标"的噪音。
+      final result = await matcher().match(
+        config: config,
+        goals: [writingGoal()],
+        tasks: [
+          doneTask(1, '上午 码字2k'),
+          doneTask(2, '取快递'),
+          doneTask(3, '交了作业'),
+        ],
+        suggestNewGoals: true,
+      );
+
+      // ignore: avoid_print
+      print('DEBUG 噪音检查 → ${result.newGoals.map((s) => s.title).toList()}');
+      expect(
+        result.newGoals,
+        isEmpty,
+        reason: '取快递、交作业这种一次性的事不该被建议建成长期目标',
+      );
+    });
+  });
+
+  group('真实 API:聊天与表情包', () {
+    Future<String> chat(String userText, {String memeHint = ''}) async {
+      final client = AiClient();
+      final buffer = StringBuffer();
+      await for (final chunk in client.streamChat(
+        config: config,
+        history: [
+          AiMessage.system(chatSystemPrompt(memeHint: memeHint)),
+          AiMessage.user(userText),
+        ],
+      )) {
+        if (!chunk.isReasoning) buffer.write(chunk.text);
+      }
+      client.dispose();
+      return buffer.toString();
+    }
+
+    test('没有附带数据时不会假装记得他的记录', () async {
+      // 用户报过"AI 无中生有记得我没记过的事"。提示词已经改成
+      // "看不到就直说",这条验证模型真的照做。
+      final reply = await chat('我上周是不是很颓?');
+      // ignore: avoid_print
+      print('DEBUG 无数据攀谈 → $reply');
+
+      // 不该出现"你上周……"这类断言式的记忆。
+      expect(
+        reply.contains('你上周') && !reply.contains('没') && !reply.contains('不知'),
+        isFalse,
+        reason: '没有数据时不该断言他上周的状态',
+      );
+    });
+
+    test('该接梗时会主动要一张表情包', () async {
+      // 发不发表情包是**概率行为**。实测命中率(见 meme_rate_test.dart):
+      // 明确要一张 3/3、庆祝 3/3、自嘲 2/3、难过 2/3、吐槽 1/3、认真问事 0/3。
+      // 所以这里给三次机会:只要有一次按格式要了图,就说明"机制是通的"。
+      //
+      // 请求之间必须留间隔:这个接口有限流,连着快发会收到**空的 400**,
+      // 报出来是"请求被拒绝,可能是这个模型不支持当前参数",
+      // 看起来像参数问题,其实是限流(踩过一次,查了很久)。
+      final hint = memeHintPrompt(memeTags);
+      String reply = '';
+      var requested = false;
+      for (var attempt = 0; attempt < 3 && !requested; attempt++) {
+        if (attempt > 0) await Future<void>.delayed(const Duration(seconds: 4));
+        reply = await chat('哈哈我今天终于把那一章写完了,爽!', memeHint: hint);
+        requested = reply.contains('[表情');
+      }
+      // ignore: avoid_print
+      print('DEBUG 表情包请求到了吗 → $requested');
+
+      expect(
+        requested,
+        isTrue,
+        reason: '三次里一次都没要表情包,说明指令机制没生效;实际回复:$reply',
+      );
+
+      // 指令要能被解析成"情绪 + 画面描述",否则应用挑不到图。
+      final directive = stripMemeDirective(reply);
+      expect(directive.hasMeme, isTrue, reason: '解析不出情绪;实际回复:$reply');
+      expect(directive.emotion.trim(), isNotEmpty);
+      // 正文里不能留下那行指令(用户不该看到它)。
+      expect(directive.text.contains('[表情'), isFalse);
+      // ignore: avoid_print
+      print(
+        'DEBUG 解析出 → 情绪「${directive.emotion}」 画面「${directive.query}」',
+      );
+    });
+
+    test('说正事时不会硬发表情包', () async {
+      await chat(
+        '帮我把这周的不足整理成三条,我要写进周报。',
+        memeHint: memeHintPrompt(memeTags),
+      );
+      // 这条不断言"一定不发"——模型偶尔会加,但正文必须完整。
+      // 真正要防的是"为了发表情包把正文挤掉",那由前一条的 directive.text 保证。
+    });
+  });
+
+  group('真实 API:周报成稿', () {    test('能按「进度/不足/调整方向」的结构出稿', () async {
       final client = AiClient();
       final buffer = StringBuffer();
 
