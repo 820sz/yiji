@@ -103,13 +103,13 @@ void main() {
       // 读过你所有打卡记录"——模型顺着它编。没有附带数据时必须直说不知道。
       for (final claim in ['长期陪伴者', '读过你所有', '大学生']) {
         expect(
-          chatSystemPrompt.contains(claim),
+          chatSystemPrompt().contains(claim),
           isFalse,
           reason: '提示词里不该有「$claim」这种它做不到的设定',
         );
       }
-      expect(chatSystemPrompt, contains('这个对话'));
-      expect(chatSystemPrompt, contains('假装'));
+      expect(chatSystemPrompt(), contains('这个对话'));
+      expect(chatSystemPrompt(), contains('假装'));
     });
 
     test('不再列举具体领域的对应关系', () {

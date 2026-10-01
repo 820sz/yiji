@@ -8,6 +8,34 @@
 library;
 
 import 'palette.dart';
+
+/// 一件做完的事,结果怎么样。
+///
+/// 原来只有"做完/没做完"两种状态,但"做了、可是没做好"是很常见的一种结果:
+/// 练了但没练到位、写是写了但写崩了。把它单独标出来,周报的"不足"那一栏
+/// 才读得到真东西,而不是只能看到"没完成 N 条"。
+enum TaskOutcome {
+  /// 没评价过(老数据、或用户懒得标)。
+  none(''),
+
+  /// 做完了,而且达到了预期。
+  done('done'),
+
+  /// 做了,但结果不好。**必须要求用户主动标**,不能靠猜。
+  fell('fell');
+
+  const TaskOutcome(this.key);
+
+  final String key;
+
+  static TaskOutcome fromKey(String? key) {
+    for (final outcome in TaskOutcome.values) {
+      if (outcome.key == key) return outcome;
+    }
+    return TaskOutcome.none;
+  }
+}
+
 /// 一条待办 = 某一天计划做的一件事。
 class Task {
   const Task({
@@ -19,6 +47,7 @@ class Task {
     required this.createdAt,
     this.completedAt,
     this.color = TaskColor.blue,
+    this.outcome = TaskOutcome.none,
   });
 
   final int id;
@@ -33,6 +62,12 @@ class Task {
 
   /// 卡片配色。用户按"每类事一个颜色"来分。
   final TaskColor color;
+
+  /// 这件事做得怎么样。只有 [TaskOutcome.fell] 需要用户主动标。
+  final TaskOutcome outcome;
+
+  /// 是不是"做了但没做好"。
+  bool get fellShort => outcome == TaskOutcome.fell;
 
   /// 从数据库行还原。
   ///
@@ -51,6 +86,7 @@ class Task {
           ? null
           : DateTime.fromMillisecondsSinceEpoch(completedAt),
       color: TaskColor.fromKey(map['color'] as String?),
+      outcome: TaskOutcome.fromKey(map['outcome'] as String?),
     );
   }
 
@@ -69,6 +105,7 @@ class Task {
       'sort_order': sortOrder,
       'created_at': createdAt.millisecondsSinceEpoch,
       'color': color.key,
+      'outcome': TaskOutcome.none.key,
     };
   }
 
@@ -78,6 +115,7 @@ class Task {
     DateTime? completedAt,
     int? sortOrder,
     TaskColor? color,
+    TaskOutcome? outcome,
   }) {
     return Task(
       id: id,
@@ -88,6 +126,7 @@ class Task {
       createdAt: createdAt,
       completedAt: completedAt ?? this.completedAt,
       color: color ?? this.color,
+      outcome: outcome ?? this.outcome,
     );
   }
 }
@@ -136,12 +175,19 @@ class Conversation {
     required this.createdAt,
     required this.updatedAt,
     this.messageCount = 0,
+    this.avatar = '',
   });
 
   final int id;
 
   /// 会话标题。空串表示还没起名,界面用首条用户消息兜底。
   final String title;
+
+  /// 这个会话里 AI 的头像(一条 base64 data URL 或空)。
+  ///
+  /// 挂在会话上而不是全局设置上:用户会按主题开不同的对话,每个对话里
+  /// 那个"人"不该都是同一张脸。
+  final String avatar;
 
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -155,6 +201,7 @@ class Conversation {
     return Conversation(
       id: map['id'] as int,
       title: (map['title'] as String?) ?? '',
+      avatar: (map['avatar'] as String?) ?? '',
       createdAt: DateTime.fromMillisecondsSinceEpoch(map['created_at'] as int),
       updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updated_at'] as int),
       messageCount: messageCount,

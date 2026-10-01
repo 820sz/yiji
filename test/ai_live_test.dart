@@ -207,7 +207,7 @@ void main() {
       await for (final chunk in client.streamChat(
         config: config,
         history: [
-          AiMessage.system(chatSystemPrompt),
+          AiMessage.system(chatSystemPrompt()),
           AiMessage.user('用一句话说明你为什么适合当我的记录助手。'),
         ],
       )) {

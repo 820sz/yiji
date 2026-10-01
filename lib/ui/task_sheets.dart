@@ -9,6 +9,7 @@ import '../data/reminder.dart';
 import '../state/app_state.dart';
 import 'task_card.dart';
 import 'theme.dart';
+import 'time_sheet.dart';
 
 /// 新增待办的弹层。
 ///
@@ -260,14 +261,10 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
   Future<void> _addReminder() async {
     final state = AppScope.of(context);
     final text = _controller.text.trim();
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: const TimeOfDay(hour: 8, minute: 0),
-    );
+    final picked = await showTimePickerSheet(context, initial: '');
     if (picked == null || !mounted) return;
 
-    final at = '${picked.hour.toString().padLeft(2, '0')}:'
-        '${picked.minute.toString().padLeft(2, '0')}';
+    final at = picked;
     // 内容留空时用这句兜底,总比一条没有正文的通知好。
     final title = text.isEmpty ? '到点提醒' : text;
     final taskId = await state.addTaskOn(widget.day, title);
@@ -663,6 +660,7 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
   late final _controller = TextEditingController(text: widget.task.text);
   late TaskColor _color = widget.task.color;
   late bool _done = widget.task.done;
+  late TaskOutcome _outcome = widget.task.outcome;
   bool _saving = false;
 
   /// 这条任务已有的提醒时刻(`HH:mm`);null 表示没设。
@@ -731,14 +729,10 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
     }
 
     if (!mounted) return;
-    final picked = await showTimePicker(
-      context: context,
-      initialTime: _parseTime(current) ?? const TimeOfDay(hour: 8, minute: 0),
-    );
+    final picked = await showTimePickerSheet(context, initial: current ?? '');
     if (picked == null || !mounted) return;
 
-    final at = '${picked.hour.toString().padLeft(2, '0')}:'
-        '${picked.minute.toString().padLeft(2, '0')}';
+    final at = picked;
     // 先清掉旧的,避免同一条任务堆出多个提醒。
     final existing = await state.remindersOn(widget.day);
     for (final reminder in existing.where((r) => r.taskId == widget.task.id)) {
@@ -787,16 +781,6 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
     }
   }
 
-  static TimeOfDay? _parseTime(String? at) {
-    if (at == null) return null;
-    final parts = at.split(':');
-    if (parts.length != 2) return null;
-    final hour = int.tryParse(parts[0]);
-    final minute = int.tryParse(parts[1]);
-    if (hour == null || minute == null) return null;
-    return TimeOfDay(hour: hour, minute: minute);
-  }
-
   @override
   void dispose() {
     _controller.dispose();
@@ -816,7 +800,12 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
     } else {
       await state.updateTaskOn(
         widget.day,
-        widget.task.copyWith(text: text, color: _color, done: _done),
+        widget.task.copyWith(
+          text: text,
+          color: _color,
+          done: _done,
+          outcome: _outcome,
+        ),
       );
     }
     navigator.pop();
@@ -920,6 +909,40 @@ class _TaskEditorPageState extends State<_TaskEditorPage> {
             ),
           ),
           const SizedBox(height: 12),
+          // "这件事做得怎么样"。放在编辑页而不是卡片上:这是需要**用户判断**
+          // 的一件事(周报的"不足"要读它),不是每天点几十次的动作,
+          // 所以给一块安静的地方,而不是往卡片上再抢一块可点区域。
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+            child: Row(
+              children: [
+                Text(
+                  '完成情况',
+                  style: TextStyle(fontSize: 13, color: textSecondary),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Wrap(
+                    spacing: 8,
+                    children: [
+                      for (final option in [
+                        (TaskOutcome.done, '达到预期'),
+                        (TaskOutcome.fell, '没做好'),
+                      ])
+                        ChoiceChip(
+                          label: Text(option.$2),
+                          selected: _outcome == option.$1,
+                          onSelected: (picked) => setState(
+                            () => _outcome = picked ? option.$1 : TaskOutcome.none,
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
           // 底部动作条,对应原子笔记编辑页下面那排。
           Material(
             color: dark ? AppTheme.darkSurface : AppTheme.lightSurface,

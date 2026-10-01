@@ -121,6 +121,13 @@ class _TodayScreenState extends State<TodayScreen> {
           onShift: state.shiftDay,
           onToday: state.goToToday,
           onCycleSort: () => setState(() => _sort = _sort.next),
+          onToggleReorder: () => setState(() {
+            // 进入排序模式时自动切到"自定义":别的排序方式会把拖出来的
+            // 顺序立刻重排掉,那样拖了等于没拖。
+            if (!_reordering) _sort = TaskSort.custom;
+            _reordering = !_reordering;
+            if (_reordering) state.clearSelection();
+          }),
           onCancelSelect: () {
             setState(() => _reordering = false);
             state.clearSelection();
@@ -153,6 +160,7 @@ class _TodayScreenState extends State<TodayScreen> {
                         selectedIds: state.selected,
                         justAddedId: state.justAddedId,
                         reorderable: reorderable,
+                        sortIsCustom: _sort == TaskSort.custom,
                         onReorder: _reorder,
                       ),
                       // 已完成与未完成之间的分界。原子笔记里这条线很明显,
@@ -167,6 +175,7 @@ class _TodayScreenState extends State<TodayScreen> {
                           selectedIds: state.selected,
                           justAddedId: state.justAddedId,
                           reorderable: reorderable,
+                          sortIsCustom: _sort == TaskSort.custom,
                           onReorder: _reorder,
                         ),
                       ],
@@ -221,6 +230,8 @@ class _TodayScreenState extends State<TodayScreen> {
 ///
 /// 抽出来是因为两段要分别渲染,而且都支持拖拽:分界线夹在中间,
 /// 所以不能用一个大列表,只能两个 ReorderableListView。
+/// 待办列表里的一段(未完成 / 已完成)。分两段是因为中间要插那条分界线,
+/// 所以不能用一个大列表,只能两个 ReorderableListView。
 class _TaskSection extends StatelessWidget {
   const _TaskSection({
     required this.tasks,
@@ -231,6 +242,7 @@ class _TaskSection extends StatelessWidget {
     required this.justAddedId,
     required this.reorderable,
     required this.onReorder,
+    this.sortIsCustom = true,
   });
 
   final List<Task> tasks;
@@ -240,6 +252,7 @@ class _TaskSection extends StatelessWidget {
   final Set<int> selectedIds;
   final int? justAddedId;
   final bool reorderable;
+  final bool sortIsCustom;
   final void Function(List<Task>, int, int) onReorder;
 
   @override
@@ -264,6 +277,7 @@ class _TaskSection extends StatelessWidget {
           selected: selectedIds.contains(task.id),
           justAdded: justAddedId == task.id,
           reorderable: reorderable,
+          sortIsCustom: sortIsCustom,
         );
       },
     );
@@ -272,10 +286,13 @@ class _TaskSection extends StatelessWidget {
 
 /// 一条待办。
 ///
-/// 三种交互分工:
+/// 交互分工:
 /// - 点文字 → 进编辑页
 /// - 点右边圆圈 → 打钩(一天几十次的动作,不给它加绕路)
-/// - 长按 → 进入多选与排序
+/// - **左滑 → 标记完成**(这也是几十次的动作,不该比打钩更难)
+/// - **右滑 → 删除**(破坏性的那个放后面,而且带撤回)
+/// - **长按 → 直接拖着排序**(不用先进"排序模式")
+/// - 多选模式下的勾选框 → 批量操作
 class _TaskRow extends StatelessWidget {
   const _TaskRow({
     super.key,
@@ -287,6 +304,7 @@ class _TaskRow extends StatelessWidget {
     required this.selected,
     this.justAdded = false,
     this.reorderable = false,
+    this.sortIsCustom = true,
   });
 
   final Task task;
@@ -298,59 +316,122 @@ class _TaskRow extends StatelessWidget {
   final bool justAdded;
   final bool reorderable;
 
+  /// 当前排序方式是不是"自定义"。不是的话长按不能用来拖动(会被重排掉)。
+  final bool sortIsCustom;
+
   @override
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
 
     final card = Dismissible(
       key: ValueKey('dismiss-${task.id}'),
-      direction: selecting ? DismissDirection.none : DismissDirection.endToStart,
-      background: const _SwipeBackground(),
-      // 删除必须在 dismiss 动画**之前**落库并刷新列表。
+      // 左滑完成、右滑删除。direction 用 horizontal 才两个方向都收手势。
+      direction: selecting || reorderable
+          ? DismissDirection.none
+          : DismissDirection.horizontal,
+      background: const _SwipeBackground(done: true),
+      secondaryBackground: const _SwipeBackground(done: false),
+      // 两个动作都必须在 dismiss 动画**之前**落库并刷新列表。
       // 放在 onDismissed 里是异步的,会出现"已经通知重建、列表里却还有这条"
       // 的窗口,Flutter 会直接抛 "A dismissed Dismissible widget is still
       // part of the tree"(debug 下整屏红)。
-      confirmDismiss: (_) async {
-        await state.deleteTaskOn(day, task);
-        // 这一条已经从数据里删掉了,列表刷新之后它就不该再被渲染,
-        // 所以返回 false 让 Dismissible 自己收回去,而不是走 dismiss 流程。
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.startToEnd) {
+          // 右滑删除,给一次撤回的机会:左滑是完成,右滑一步就是不可逆的删除,
+          // 太容易误触了。
+          return await _confirmDelete(context, state);
+        }
+        await state.toggleTaskOn(day, task);
+        // 这一条的状态已经变了,列表刷新后它会被挪到"已完成"那一段,
+        // 所以这里返回 false 让 Dismissible 自己收回去,不走 dismiss 流程。
         return false;
       },
-      child: TaskCard(
-        task: task,
-        dark: dark,
-        selected: selected,
-        selecting: selecting,
-        justAdded: justAdded,
-        reordering: reorderable,
-        onToggleSelect: () => state.toggleSelection(task.id),
-        onTap: selecting
-            ? () => state.toggleSelection(task.id)
-            : () => showTaskEditor(context, task: task, day: day),
-        onToggleDone: selecting ? null : () => state.toggleTaskOn(day, task),
-        onLongPress: () => state.toggleSelection(task.id),
-        dragHandle: reorderable
-            ? ReorderableDragStartListener(
-                index: index,
-                child: Icon(
-                  Icons.drag_handle,
-                  size: 22,
-                  color: dark
-                      ? AppTheme.darkTextSecondary
-                      : AppTheme.lightTextSecondary,
-                ),
-              )
-            : null,
+      child: _DragToReorder(
+        // 只在排序模式下让长按变成拖动:平时长按是"进入多选"(既有行为,
+        // 用户已经习惯),两个长按只能留一个。排序模式下整张卡片按住就能拖,
+        // 不用去够右边那个小把手。
+        enabled: !selecting && reorderable,
+        index: index,
+        child: TaskCard(
+          task: task,
+          dark: dark,
+          selected: selected,
+          selecting: selecting,
+          justAdded: justAdded,
+          reordering: reorderable,
+          onToggleSelect: () => state.toggleSelection(task.id),
+          onTap: selecting
+              ? () => state.toggleSelection(task.id)
+              : () => showTaskEditor(context, task: task, day: day),
+          onToggleDone: selecting ? null : () => state.toggleTaskOn(day, task),
+          // 长按进多选。排序模式下长按被拖动接管(见上面的 _DragToReorder),
+          // 所以那时不接这个回调,免得两个手势抢。
+          onLongPress: selecting
+              ? () => state.toggleSelection(task.id)
+              : (reorderable ? null : () => state.toggleSelection(task.id)),
+          dragHandle: reorderable
+              ? ReorderableDragStartListener(
+                  index: index,
+                  child: Icon(
+                    Icons.drag_handle,
+                    size: 22,
+                    color: dark
+                        ? AppTheme.darkTextSecondary
+                        : AppTheme.lightTextSecondary,
+                  ),
+                )
+              : null,
+        ),
       ),
     );
+
     return card;
+  }
+
+  /// 右滑删除前的确认。
+  Future<bool> _confirmDelete(BuildContext context, AppState state) async {
+    final messenger = ScaffoldMessenger.of(context);
+    await state.deleteTaskOn(day, task);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('已删除「${task.text}」'),
+        action: SnackBarAction(
+          label: '撤回',
+          onPressed: () => state.restoreTask(task),
+        ),
+      ),
+    );
+    return false;
+  }
+}
+
+/// 长按就把这条拖起来排序。
+///
+/// 只在**排序模式打开时**启用(见 `_reordering`)。平时长按留给"进入多选":
+/// 两者都是长按,只能有一个生效,而多选是已有行为、用户已经习惯。
+/// 排序模式下整张卡片按住就能拖,不用去够右边那个把手。
+class _DragToReorder extends StatelessWidget {
+  const _DragToReorder({
+    required this.enabled,
+    required this.index,
+    required this.child,
+  });
+
+  final bool enabled;
+  final int index;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    return ReorderableDelayedDragStartListener(
+      index: index,
+      child: child,
+    );
   }
 }
 
 /// 已完成与未完成之间的分界。
-///
-/// 一条细线加一个"已完成 N"的小标签:原子笔记里这条线把"还要做的"和"做完的"
-/// 分成两块,看一眼就知道今天还剩几件。没有已完成项时整块不出现。
 class _DoneDivider extends StatelessWidget {
   const _DoneDivider({required this.count});
 
@@ -381,16 +462,29 @@ class _DoneDivider extends StatelessWidget {
   }
 }
 
-/// 左滑删除时露出的背景。
+/// 滑动时露出的背景。
+///
+/// [done] 为真表示这是**左滑**(标为完成)露出来的那一侧;为假是右滑(删除)。
+/// 两边的图标和颜色必须一眼能分开,否则用户分不清这一滑会做什么。
 class _SwipeBackground extends StatelessWidget {
-  const _SwipeBackground();
+  const _SwipeBackground({required this.done});
+
+  final bool done;
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      alignment: Alignment.centerRight,
-      padding: const EdgeInsets.only(right: 22, bottom: AppTheme.cardGap),
-      child: const Icon(Icons.delete_outline, color: Color(0xFFE05252)),
+      // 左滑露出的在右边,右滑露出的在左边。
+      alignment: done ? Alignment.centerRight : Alignment.centerLeft,
+      padding: EdgeInsets.only(
+        right: done ? 22 : 0,
+        left: done ? 0 : 22,
+        bottom: AppTheme.cardGap,
+      ),
+      child: Icon(
+        done ? Icons.check_circle_outline : Icons.delete_outline,
+        color: done ? AppTheme.accent : const Color(0xFFE05252),
+      ),
     );
   }
 }
@@ -412,6 +506,7 @@ class _Header extends StatelessWidget {
     required this.onShift,
     required this.onToday,
     required this.onCycleSort,
+    required this.onToggleReorder,
     required this.onCancelSelect,
     required this.onOpenDay,
   });
@@ -426,6 +521,7 @@ class _Header extends StatelessWidget {
   final void Function(int) onShift;
   final VoidCallback onToday;
   final VoidCallback onCycleSort;
+  final VoidCallback onToggleReorder;
   final VoidCallback onCancelSelect;
   final VoidCallback onOpenDay;
 
@@ -528,6 +624,17 @@ class _Header extends StatelessWidget {
             onPressed: onCycleSort,
             icon: Icon(Icons.sort, color: textPrimary),
             tooltip: '排序:${sort.label}',
+          ),
+          // 排序模式:进去之后长按卡片就能拖动排序。
+          // 独立一个按钮而不是塞进排序循环里:"换排序方式"和"我要手动挪位置"
+          // 是两件事,混在一起用户找不到后者。
+          IconButton(
+            onPressed: onToggleReorder,
+            icon: Icon(
+              reordering ? Icons.check : Icons.drag_indicator,
+              color: reordering ? AppTheme.accent : textPrimary,
+            ),
+            tooltip: reordering ? '完成排序' : '调整顺序',
           ),
         ],
       ),

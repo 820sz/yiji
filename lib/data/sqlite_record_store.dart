@@ -122,6 +122,16 @@ class SqliteRecordStore implements RecordStore {
   }
 
   @override
+  Future<void> setTaskOutcome(int id, TaskOutcome outcome) async {
+    await _db.update(
+      'tasks',
+      {'outcome': outcome.key},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
+  }
+
+  @override
   Future<void> updateTaskDay(int id, String day) async {
     await _db.update('tasks', {'day': day}, where: 'id = ?', whereArgs: [id]);
   }
@@ -259,9 +269,20 @@ class SqliteRecordStore implements RecordStore {
     final now = DateTime.now().millisecondsSinceEpoch;
     return _db.insert('conversations', {
       'title': title.trim(),
+      'avatar': '',
       'created_at': now,
       'updated_at': now,
     });
+  }
+
+  @override
+  Future<void> setConversationAvatar(int id, String avatar) async {
+    await _db.update(
+      'conversations',
+      {'avatar': avatar},
+      where: 'id = ?',
+      whereArgs: [id],
+    );
   }
 
   @override

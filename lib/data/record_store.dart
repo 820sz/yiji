@@ -37,6 +37,9 @@ abstract class RecordStore {
   /// 改配色。
   Future<void> updateTaskColor(int id, TaskColor color);
 
+  /// 标记这件事做得怎么样(做完 / 做了但没做好 / 没评价)。
+  Future<void> setTaskOutcome(int id, TaskOutcome outcome);
+
   /// 改计划日期(把一条待办挪到另一天)。
   Future<void> updateTaskDay(int id, String day);
 
@@ -77,6 +80,9 @@ abstract class RecordStore {
   /// 新建一个空会话,返回它的 id。
   Future<int> createConversation({String title});
 
+  /// 改某个会话的 AI 头像(base64 或空串表示恢复默认)。
+  Future<void> setConversationAvatar(int id, String avatar);
+
   Future<void> renameConversation(int id, String title);
 
   /// 删除会话及其全部消息。
@@ -111,7 +117,6 @@ abstract class RecordStore {
 
   /// 删掉某条任务的所有提醒(任务被删时调用,避免留下孤儿提醒)。
   Future<void> deleteRemindersOfTask(int taskId);
-
   /// 把某条任务的提醒挪到另一天(任务被改期时调用)。
   ///
   /// 提醒的日期是独立存的:不一起挪的话,把带提醒的任务改到下周一,

@@ -56,6 +56,18 @@ class ReportService {
     }
     buffer.writeln();
 
+    // 用户自己标过"没做好"的那些。这是"不足"那一栏里最实在的素材:
+    // 它不是"没完成",而是"做了但结果不好",两者在总结里该分开写。
+    final fellShort = done.where((t) => t.fellShort).toList();
+    if (fellShort.isNotEmpty) {
+      buffer.writeln('## 做了但用户自己标了"没做好"');
+      for (final task in fellShort) {
+        buffer.writeln('- ${shortDateLabel(task.day)} ${task.text}');
+      }
+      buffer.writeln('(这些是他主动标的判断,写"不足"时优先用这些,不要另编原因)');
+      buffer.writeln();
+    }
+
     final undone = report.undoneTasks;
     if (undone.isNotEmpty) {
       buffer.writeln('## 没完成的');
@@ -96,7 +108,19 @@ class ReportService {
       final tasks = byDay[day]!;
       buffer.writeln('${shortDateLabel(day)} ${weekdayLabel(day)}');
       for (final task in tasks) {
-        buffer.writeln('${task.done ? '✓' : '×'} ${task.text}');
+        // 三种结果分开标:做完的 ✓、没做 ×、做了但自己觉得没做好的 △。
+        // 最后那种在纯文本报告里也要能一眼看见,不然标了等于白标。
+        final mark = task.done ? (task.fellShort ? '△' : '✓') : '×';
+        buffer.writeln('$mark ${task.text}');
+      }
+      buffer.writeln();
+    }
+
+    final fellShort = report.tasks.where((t) => t.fellShort).toList();
+    if (fellShort.isNotEmpty) {
+      buffer.writeln('做了但没做好的(△):');
+      for (final task in fellShort) {
+        buffer.writeln('- ${shortDateLabel(task.day)} ${task.text}');
       }
       buffer.writeln();
     }

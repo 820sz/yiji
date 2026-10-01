@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:yiji/data/database.dart';
 import 'package:yiji/data/goals.dart';
+import 'package:yiji/data/models.dart';
 import 'package:yiji/data/palette.dart';
 import 'package:yiji/data/record_store.dart';
 import 'package:yiji/data/report_service.dart';
@@ -986,6 +987,130 @@ void main() {
       // 提醒表也能用。
       await migrated.addReminder(taskId: tasks.single.id, day: '2026-09-20', at: '08:00');
       expect(await migrated.remindersOn('2026-09-20'), hasLength(1));
+    });
+  });
+
+  group('v3 升级到 v4 不丢数据', () {
+    /// v4 加了两列:任务的 outcome(做得怎么样)和会话的 avatar(每个对话的头像)。
+    ///
+    /// 单独测这一条是因为 v3 的 conversations 表**没有** avatar 列,
+    /// 而升级路径上"建表"和"补列"分属两步——先建好带 avatar 的表再 ALTER
+    /// 就会撞 "duplicate column name"(第一次写的时候就是这么崩的)。
+    test('老任务与会话都在,新列补成默认值且可用', () async {
+      final dir = await Directory.systemTemp.createTemp('yiji_v3_to_v4');
+      final path = p.join(dir.path, 'yiji.db');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // 第一步:按 v3 的结构建库(有 conversations 但**没有** avatar,
+      // 有 tasks 但**没有** outcome)。
+      final old = await databaseFactory.openDatabase(path);
+      await old.execute('''
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL, text TEXT NOT NULL,
+          done INTEGER NOT NULL DEFAULT 0, completed_at INTEGER,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+          color TEXT NOT NULL DEFAULT 'blue'
+        )
+      ''');
+      await old.execute('CREATE INDEX idx_tasks_day ON tasks(day)');
+      await old.execute('''
+        CREATE TABLE journals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL UNIQUE, text TEXT NOT NULL, updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE conversations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          conversation_id INTEGER NOT NULL, role TEXT NOT NULL,
+          content TEXT NOT NULL, reasoning TEXT NOT NULL DEFAULT '',
+          created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE goals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          title TEXT NOT NULL, unit TEXT NOT NULL DEFAULT '', target REAL,
+          period TEXT NOT NULL, direction TEXT NOT NULL DEFAULT 'increase',
+          color TEXT NOT NULL DEFAULT 'blue', active INTEGER NOT NULL DEFAULT 1,
+          start_day TEXT, end_day TEXT, created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE progress_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          goal_id INTEGER NOT NULL, amount REAL NOT NULL, day TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', task_id INTEGER,
+          source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE reminders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL, day TEXT NOT NULL, at TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+
+      await old.insert('tasks', {
+        'day': '2026-09-25',
+        'text': 'v3 时代记的任务',
+        'done': 1,
+        'sort_order': 1,
+        'created_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+        'color': 'green',
+      });
+      final conversationId = await old.insert('conversations', {
+        'title': 'v3 时代的对话',
+        'created_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+        'updated_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+      });
+      await old.insert('messages', {
+        'conversation_id': conversationId,
+        'role': 'user',
+        'content': 'v3 时代聊的话',
+        'created_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+      });
+      await old.setVersion(3);
+      await old.close();
+
+      // 第二步:用生产的打开方式升级。
+      final upgraded = await AppDatabase.open(path: path);
+      addTearDown(upgraded.close);
+      final migrated = SqliteRecordStore(upgraded.db);
+
+      // 老数据都在。
+      final tasks = await migrated.tasksOfDay('2026-09-25');
+      expect(tasks.single.text, 'v3 时代记的任务');
+      expect(tasks.single.color, TaskColor.green);
+      final conversations = await migrated.conversations();
+      expect(conversations.single.title, 'v3 时代的对话');
+      expect(
+        (await migrated.messagesOf(conversations.single.id)).single.content,
+        'v3 时代聊的话',
+      );
+
+      // 新列补成了默认值:老任务没有"做得怎么样"的评价。
+      expect(tasks.single.outcome, TaskOutcome.none);
+      expect(tasks.single.fellShort, isFalse);
+      expect(conversations.single.avatar, '');
+
+      // 新列真的能用。
+      await migrated.setTaskOutcome(tasks.single.id, TaskOutcome.fell);
+      final marked = (await migrated.tasksOfDay('2026-09-25')).single;
+      expect(marked.outcome, TaskOutcome.fell);
+      expect(marked.fellShort, isTrue);
+
+      await migrated.setConversationAvatar(conversations.single.id, 'data:image/png;base64,AAA');
+      expect((await migrated.conversations()).single.avatar, 'data:image/png;base64,AAA');
     });
   });
 }

@@ -171,9 +171,9 @@ void main() {
       await tester.tap(find.text('提醒'));
       await tester.pumpAndSettle();
 
-      // 时间选择器弹出。用结构定位而不是中文文案:按钮文字取决于设备语言。
-      expect(find.byType(TimePickerDialog), findsOneWidget);
-      await tester.tap(find.text('OK'));
+      // 自建的滚轮选择器(系统的 24 小时钟面会把 0-23 挤成一团、容易点错)。
+      expect(find.text('提醒时间'), findsOneWidget);
+      await tester.tap(find.text('确定'));
       await tester.pumpAndSettle();
 
       final reminders = await store.remindersOn(today);

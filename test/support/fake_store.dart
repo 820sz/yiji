@@ -207,6 +207,13 @@ class FakeStore implements RecordStore {
   }
 
   @override
+  Future<void> setTaskOutcome(int id, TaskOutcome outcome) async {
+    final index = _tasks.indexWhere((t) => t.id == id);
+    if (index < 0) return;
+    _tasks[index] = _tasks[index].copyWith(outcome: outcome);
+  }
+
+  @override
   Future<void> reorderTasks(String day, List<int> orderedIds) async {
     for (var order = 0; order < orderedIds.length; order++) {
       final index = _tasks.indexWhere(
@@ -333,6 +340,20 @@ class FakeStore implements RecordStore {
       ),
     );
     return id;
+  }
+
+  @override
+  Future<void> setConversationAvatar(int id, String avatar) async {
+    final index = _conversations.indexWhere((c) => c.id == id);
+    if (index < 0) return;
+    final old = _conversations[index];
+    _conversations[index] = Conversation(
+      id: old.id,
+      title: old.title,
+      avatar: avatar,
+      createdAt: old.createdAt,
+      updatedAt: old.updatedAt,
+    );
   }
 
   @override

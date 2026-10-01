@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 
 import 'state/app_state.dart';
 import 'ui/calendar_screen.dart';
@@ -52,6 +53,11 @@ class _YijiAppState extends State<YijiApp> {
               title: '忆记',
               debugShowCheckedModeBanner: false,
               theme: AppTheme.build(dark: dark),
+              // 系统自带的那些组件(时间选择器、长按菜单)文案跟着这里走,
+              // 不配的话它们会显示英文,和界面其它部分割裂。
+              localizationsDelegates: GlobalMaterialLocalizations.delegates,
+              supportedLocales: const [Locale('zh', 'CN'), Locale('en')],
+              locale: const Locale('zh', 'CN'),
               home: SplashGate(
                 enabled: widget.enableSplash,
                 child: const HomeShell(),

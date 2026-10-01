@@ -118,24 +118,53 @@ class TaskCard extends StatelessWidget {
                           : const SizedBox.shrink(),
                     ),
                     Expanded(
-                      child: Text(
-                        task.text,
-                        style: TextStyle(
-                          fontSize: 16,
-                          height: 1.45,
-                          // 字重跟着同一个进度插值,和颜色一起过渡。
-                          fontWeight: FontWeight.lerp(
-                            FontWeight.w500,
-                            FontWeight.w400,
-                            doneAmount,
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            task.text,
+                            style: TextStyle(
+                              fontSize: 16,
+                              height: 1.45,
+                              // 字重跟着同一个进度插值,和颜色一起过渡。
+                              fontWeight: FontWeight.lerp(
+                                FontWeight.w500,
+                                FontWeight.w400,
+                                doneAmount,
+                              ),
+                              color: shownForeground,
+                              decoration: task.done
+                                  ? TextDecoration.lineThrough
+                                  : null,
+                              decorationColor: shownForeground,
+                              decorationThickness: 1.6,
+                            ),
                           ),
-                          color: shownForeground,
-                          decoration: task.done
-                              ? TextDecoration.lineThrough
-                              : null,
-                          decorationColor: shownForeground,
-                          decorationThickness: 1.6,
-                        ),
+                          // "做了但没做好"要看得见:它是周报里"不足"那一栏的来源,
+                          // 标了却在列表上看不出来,用户就会以为白标了。
+                          if (task.fellShort)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 4),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(
+                                    Icons.error_outline,
+                                    size: 13,
+                                    color: shownForeground.withValues(alpha: 0.75),
+                                  ),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    '没做好',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: shownForeground.withValues(alpha: 0.75),
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
                       ),
                     ),
                     if (!selecting && !reordering)

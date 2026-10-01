@@ -16,6 +16,8 @@ class ChatAttachment {
     this.imageBytes,
     this.text,
     this.sizeBytes = 0,
+    this.imageRef = '',
+    this.memeCaption = '',
   });
 
   final String name;
@@ -28,6 +30,15 @@ class ChatAttachment {
   final String? text;
 
   final int sizeBytes;
+
+  /// 图片存下来之后的引用(`asset:...` 或磁盘文件名)。
+  ///
+  /// 消息文本里记的是它而不是字节:回看历史要能把图重新渲染出来,
+  /// 而 base64 进库会让每条消息膨胀几百 KB。
+  final String imageRef;
+
+  /// 表情包的一句描述(只有表情包会填),用来在待发列表里说明这是什么。
+  final String memeCaption;
 
   /// 能直接读成文本的扩展名。
   ///
@@ -81,6 +92,30 @@ class ChatAttachment {
     return null;
   }
 
+  /// 从内置表情包构造一个附件。
+  ///
+  /// 表情包不走"读字节"那条路:它已经在 APK 的 assets 里,
+  /// 消息里只要记一个 `asset:` 引用,回看时按需渲染。
+  factory ChatAttachment.meme({
+    required String assetPath,
+    required String caption,
+    required String tag,
+  }) {
+    return ChatAttachment(
+      name: caption.isEmpty ? '表情包' : caption,
+      isImage: true,
+      imageRef: 'asset:$assetPath',
+      memeCaption: caption,
+      sizeBytes: 0,
+    );
+  }
+
   /// 拼进消息文本里的样子。
-  String get describe => isImage ? '[图片] $name' : '[文件] $name';
+  ///
+  /// 图片行写成 `![图] <引用>`,界面据此把图渲染出来(而不是显示文件名)。
+  /// 文本文件仍然只是标注一下——它的内容本来就跟着发出去了。
+  String get describe {
+    if (!isImage) return '[文件] $name';
+    return imageRef.isEmpty ? '[图片] $name' : '![图] $imageRef';
+  }
 }

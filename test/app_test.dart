@@ -971,8 +971,9 @@ void main() {
 
       await tester.tap(find.byTooltip('加提醒'));
       await tester.pumpAndSettle();
-      // 时间选择器直接确定(默认 08:00)。
-      await tester.tap(find.text('OK'));
+      // 自建的滚轮时刻选择器:滚动不需要瞄准,直接点确定用默认的 08:00。
+      expect(find.text('提醒时间'), findsOneWidget);
+      await tester.tap(find.text('确定'));
       await tester.pumpAndSettle();
 
       // 列表里出现这个时刻。

@@ -10,6 +10,10 @@ dependencies:
   file_picker: ^13.1.0
   flutter:
     sdk: flutter
+  # 系统组件的文案(时间选择器的"取消/确定"、语义标签)跟着它变成中文。
+  # 不加的话那些按钮是英文的,和整个 app 的中文界面割裂。
+  flutter_localizations:
+    sdk: flutter
   flutter_local_notifications: 22.0.0
   http: ^1.6.0
   image_picker: ^1.2.3
@@ -29,3 +33,21 @@ dev_dependencies:
     sdk: flutter
 flutter:
   uses-material-design: true
+  assets:
+    # 内置表情包图库(108 张 WebP,约 3.6MB)。
+    # 打进包而不是按需下载:发表情包不该依赖网络,也不该让用户先等下载。
+    #
+    # 每个 tag 目录都要单独列:Flutter 的资源声明**不支持通配符**,
+    # 写 `assets/memes/**` 会让 flutter 工具直接崩(Illegal character in path: **),
+    # 只写 `assets/memes/` 又只包含该目录下的文件、不含子目录。
+    # 新增 tag 目录时记得在这里补一行。
+    - assets/memes/index.json
+    - assets/memes/angry/
+    - assets/memes/confused/
+    - assets/memes/daily/
+    - assets/memes/happy/
+    - assets/memes/sad/
+    - assets/memes/shy/
+    - assets/memes/sleep/
+    - assets/memes/surprised/
+    - assets/memes/work/

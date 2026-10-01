@@ -18,7 +18,7 @@ class AppDatabase {
   /// v2 及以前所有消息混在一条历史里,新开的对话也能"看到"以前聊过的内容,
   /// 表现出来就是 AI 无中生有地提起你从没在这个对话里说过的事。
   /// v3 给消息加上会话归属,并把 `goals.target` 改成可空(推进条可以不预设目标值)。
-  static const _version = 3;
+  static const _version = 4;
 
   /// 打开(必要时创建或升级)数据库。
   ///
@@ -50,7 +50,8 @@ class AppDatabase {
         completed_at INTEGER,
         sort_order INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
-        color TEXT NOT NULL DEFAULT 'blue'
+        color TEXT NOT NULL DEFAULT 'blue',
+        outcome TEXT NOT NULL DEFAULT ''
       )
     ''');
     // 按天查列表、按区间查周报,都走这个索引。
@@ -88,13 +89,32 @@ class AppDatabase {
     );
   }
 
-  /// 只建会话表。v3 迁移里用得上:那时候 messages 表已经存在(v1/v2 就有),
+  /// 只建会话表。
+  ///
+  /// v3 迁移里用得上:那时候 messages 表已经存在(v1/v2 就有),
   /// 只需要补上 conversations 与 messages.conversation_id。
+  ///
+  /// 建的是**v3 当时的样子**(没有 avatar 列):升级是一步一步走的,
+  /// v4 那一步会自己 ALTER 补列。这里如果把 avatar 一起建出来,
+  /// 从 v2 升上来的库就会在 v4 那步撞 "duplicate column name: avatar"。
+  static Future<void> createConversationTableV3(DatabaseExecutor db) async {
+    await db.execute('''
+      CREATE TABLE conversations (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        title TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    ''');
+  }
+
+  /// 建会话表(当前版本的样子)。新建库时用这个。
   static Future<void> createConversationTable(DatabaseExecutor db) async {
     await db.execute('''
       CREATE TABLE conversations (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         title TEXT NOT NULL DEFAULT '',
+        avatar TEXT NOT NULL DEFAULT '',
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL
       )
@@ -170,7 +190,7 @@ class AppDatabase {
       //
       // 注意 messages 表在 v1/v2 就存在了,所以这里只建 conversations、
       // 给 messages 补一列,不能整个重建(会撞 "table messages already exists")。
-      await createConversationTable(db);
+      await createConversationTableV3(db);
       await db.execute(
         'ALTER TABLE messages ADD COLUMN conversation_id INTEGER NOT NULL DEFAULT 0',
       );
@@ -218,6 +238,14 @@ class AppDatabase {
       await db.execute('DROP TABLE goals_old');
 
       await createReminderTable(db);
+    }
+    if (from < 4) {
+      // v4:任务的完成质量。原来只有"做完/没做完"两种状态,但"做了、可是没做好"
+      // 是很常见的一种结果,而且正是周报"不足"那一栏最该看到的东西。
+      // 空串表示用户没评价过(老数据全是空串,读起来就是"没标过")。
+      await db.execute("ALTER TABLE tasks ADD COLUMN outcome TEXT NOT NULL DEFAULT ''");
+      // v4:每条会话有自己的头像。以前头像挂在全局设置上,换个对话还是同一张脸。
+      await db.execute("ALTER TABLE conversations ADD COLUMN avatar TEXT NOT NULL DEFAULT ''");
     }
   }
 

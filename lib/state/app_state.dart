@@ -17,6 +17,8 @@ import '../ai/settings_store.dart';
 import '../core/day.dart';
 import '../data/database.dart';
 import '../data/chat_attachment.dart';
+import '../data/chat_images.dart';
+import '../data/meme_directive.dart';
 import '../data/data_range.dart';
 import '../data/goals.dart';
 import '../data/models.dart';
@@ -126,6 +128,14 @@ class AppState extends ChangeNotifier {
 
   String _streamingAnswer = '';
   String get streamingAnswer => _streamingAnswer;
+
+  /// 流式回答里"能给用户看"的那部分。
+  ///
+  /// 模型要表情包时会写一行 `[表情: 情绪 | 描述]`,那是给系统的指令,
+  /// 不该出现在气泡里。流式是一段一段到的,这一行可能刚收到半个,
+  /// 所以渲染时裁:遇到未闭合的标记就把标记之后的部分藏起来,
+  /// 等它收完整了再连同标记一起去掉。
+  String get visibleStreamingAnswer => stripMemeDirective(_streamingAnswer).text;
 
   /// 流式内容的变更通知。
   ///
@@ -343,6 +353,26 @@ class AppState extends ChangeNotifier {
     if (nowDone) unawaited(_autoSyncProgress());
   }
 
+  /// 标记"这件事做得怎么样"。
+  ///
+  /// 只有"做了但没做好"需要用户主动标:周报的"不足"那一栏要读它,
+  /// 但那是**用户的判断**,不能让 AI 去猜。
+  Future<void> setTaskOutcome(Task task, TaskOutcome outcome) async {
+    await _store.setTaskOutcome(task.id, outcome);
+    await _loadDay();
+  }
+
+  /// 同上,但用在"正在看别的某一天"的场景(日历)。
+  Future<void> setTaskOutcomeOn(
+    String day,
+    Task task,
+    TaskOutcome outcome,
+  ) async {
+    await _store.setTaskOutcome(task.id, outcome);
+    await loadCalendarMonth(_calendarMonth);
+    if (day == _currentDay) await _loadDay();
+  }
+
   Future<void> editTask(Task task, String text) async {
     if (text.trim().isEmpty) {
       await _store.deleteTask(task.id);
@@ -358,6 +388,23 @@ class AppState extends ChangeNotifier {
     // 任务没了,它排出去的系统通知也要跟着撤掉。不撤的话手机还会到点弹一条
     // 指向已删除任务的通知,点进去什么都没有。
     unawaited(syncReminders());
+  }
+
+  /// 把刚删掉的一条加回来(右滑删除的"撤回")。
+  ///
+  /// 撤回是**重建**一条同内容的任务,而不是把原来的行恢复:主键会变,
+  /// 挂在它上面的进度条目和提醒不会自动跟回来。所以这里会明确说清楚
+  /// "内容回来了,但提醒要重设",不要假装什么都没发生。
+  Future<void> restoreTask(Task task) async {
+    await _store.addTask(task.day, task.text, color: task.color);
+    if (task.done) {
+      final restored = (await _store.tasksOfDay(task.day))
+          .where((t) => t.text == task.text)
+          .lastOrNull;
+      if (restored != null) await _store.setTaskDone(restored.id, true);
+    }
+    await _loadDay();
+    await loadCalendarMonth(_calendarMonth);
   }
 
   /// 把某条待办挪到另一天。
@@ -476,6 +523,7 @@ class AppState extends ChangeNotifier {
     await _store.updateTaskText(task.id, task.text);
     await _store.updateTaskColor(task.id, task.color);
     await _store.setTaskDone(task.id, task.done);
+    await _store.setTaskOutcome(task.id, task.outcome);
     await loadCalendarMonth(_calendarMonth);
     if (day == _currentDay) await _loadDay();
     await _refreshPendingSync();
@@ -803,6 +851,43 @@ class AppState extends ChangeNotifier {
     return '';
   }
 
+  /// 当前会话的 AI 头像(base64 data URL,空串表示用默认的模型标志)。
+  ///
+  /// 头像是**每个会话各自**的:不同对话可以是不同的人设。
+  Uint8List? get currentConversationAvatar =>
+      _decodeAvatar(currentConversation?.avatar ?? '');
+
+  Conversation? get currentConversation {
+    for (final conversation in _conversations) {
+      if (conversation.id == _currentConversationId) return conversation;
+    }
+    return null;
+  }
+
+  static Uint8List? _decodeAvatar(String base64Text) {
+    if (base64Text.trim().isEmpty) return null;
+    try {
+      // 存的时候带上 data URL 前缀,这里剥掉再解。
+      final payload = base64Text.contains(',')
+          ? base64Text.split(',').last
+          : base64Text;
+      return base64Decode(payload);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  /// 给当前会话换一张 AI 头像。传 null 恢复默认。
+  Future<void> saveConversationAvatar(Uint8List? bytes) async {
+    final id = _currentConversationId;
+    if (id == 0) return;
+    final encoded = bytes == null
+        ? ''
+        : 'data:image/png;base64,${base64Encode(bytes)}';
+    await _store.setConversationAvatar(id, encoded);
+    await loadConversations();
+  }
+
   /// 载入会话列表,并保证当前会话有效。
   ///
   /// 首次打开、或删掉了当前会话时,自动选中最近活跃的那个;
@@ -876,28 +961,56 @@ class AppState extends ChangeNotifier {
     // 对话则悄悄少了一次回答。
     _streamingConversationId = conversationId;
 
+    // 图片先落盘再记引用:消息里存 base64 会让每条消息膨胀几百 KB,
+    // 回看历史和查库都会变慢。存不下来就退化成文件名——至少不丢信息。
+    final resolved = <ChatAttachment>[];
+    for (final file in attachments) {
+      if (!file.isImage || file.imageRef.isNotEmpty || file.imageBytes == null) {
+        resolved.add(file);
+        continue;
+      }
+      final saved = await ChatImages.save(file.imageBytes!, file.name);
+      resolved.add(
+        saved == null
+            ? file
+            : ChatAttachment(
+                name: file.name,
+                isImage: true,
+                imageBytes: file.imageBytes,
+                imageRef: saved,
+                sizeBytes: file.sizeBytes,
+              ),
+      );
+    }
+
     // 附件也写进消息文本:回看聊天记录时要知道当时发了什么。
+    // 图片写成 `![图] <引用>` 而不是文件名——界面上要真的把图渲染出来。
     final shown = [
       trimmed,
-      for (final file in attachments) file.describe,
+      for (final file in resolved) file.describe,
     ].where((line) => line.isNotEmpty).join('\n');
     await _store.addMessage(conversationId, 'user', shown);
     await _loadChat();
 
     final images = <String>[
-      for (final file in attachments)
+      for (final file in resolved)
         if (file.isImage && file.imageBytes != null)
           'data:image/${_imageMime(file.name)};base64,'
               '${base64Encode(file.imageBytes!)}',
     ];
     final fileTexts = [
-      for (final file in attachments)
+      for (final file in resolved)
         if (!file.isImage && file.text != null)
           '--- 文件:${file.name} ---\n${file.text}',
     ];
 
+    // 表情包库非空时才把发图规则写进提示词:没有素材却允许它发,
+    // 它就会写一行永远挑不到图的指令,还白占上下文。
+    final memes = await MemeLibrary.load();
+    final memeHint = memes.isEmpty ? '' : memeHintPrompt(memes.tags.join(' / '));
+
     final history = <AiMessage>[
-      AiMessage.system(chatSystemPrompt),
+      AiMessage.system(chatSystemPrompt(memeHint: memeHint)),
     ];
     if (range != null) {
       // 按选中区间现取数据,而不是复用周报/月报的边界——范围是他自己选的。
@@ -942,6 +1055,9 @@ class AppState extends ChangeNotifier {
       if (chunk.isReasoning) {
         _streamingReasoning += chunk.text;
       } else {
+        // 正文和"要哪张表情包"的指令混在一条流里。指令那行是给系统看的,
+        // 不能显示给用户,而流是一段段来的、标记可能被切在两个字中间,
+        // 所以交给 [visibleStreamingAnswer] 在渲染时裁掉,不在这里判断。
         _streamingAnswer += chunk.text;
       }
       // 只惊动正在长的那个气泡。整页 notifyListeners 会让每一帧都重排
@@ -968,7 +1084,7 @@ class AppState extends ChangeNotifier {
 
   /// 流式回复结束后落库,让下次打开还能看到。
   Future<void> commitAssistantMessage() async {
-    final answer = _streamingAnswer.trim();
+    final raw = _streamingAnswer.trim();
     final reasoning = _streamingReasoning.trim();
     _streamingAnswer = '';
     _streamingReasoning = '';
@@ -977,6 +1093,16 @@ class AppState extends ChangeNotifier {
     // 翻到别的对话去了。
     final target = _streamingConversationId;
     _streamingConversationId = 0;
+
+    // 模型可能要求了一张表情包。挑图在这里做:挑到了就把它作为一行
+    // `![图] asset:...` 追加到正文后面,回看历史时能直接渲染出来。
+    final directive = stripMemeDirective(raw);
+    var answer = directive.text.trim();
+    if (directive.hasMeme) {
+      final meme = await _pickMeme(directive);
+      if (meme != null) answer = '$answer\n\n${memeLineFor(meme.assetPath)}';
+    }
+
     if (answer.isEmpty || target == 0) {
       notifyListeners();
       return;
@@ -985,6 +1111,20 @@ class AppState extends ChangeNotifier {
     // 还没起名的会话用首条用户消息当标题——侧边栏里一堆"新对话"没法分辨。
     await _autoTitleConversation(target);
     await loadConversations();
+  }
+
+  /// 按模型给的情绪和画面描述挑一张表情包。
+  Future<Meme?> _pickMeme(MemeDirective directive) async {
+    final library = await MemeLibrary.load();
+    if (library.isEmpty) return null;
+    final tag = library.tagForEmotion(directive.emotion);
+    // 用情绪+描述一起检索;同一个对话里同一句话应该挑到同一张,
+    // 所以拿整段指令当种子,而不是随机。
+    return library.pick(
+      tag: tag,
+      query: '${directive.emotion} ${directive.query}'.trim(),
+      seed: directive.emotion.hashCode ^ directive.query.hashCode,
+    );
   }
 
   /// 会话还没标题时,拿首条用户消息命名。
