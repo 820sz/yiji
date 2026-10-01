@@ -17,22 +17,30 @@ class GoalMatcher {
   ///
   /// [goals] 与 [tasks] 的**下标 + 1** 就是提示词里的编号,回包按编号引用,
   /// 所以这里的顺序必须和拼进提示词的顺序完全一致。
-  Future<List<ProgressSuggestion>> match({
+  ///
+  /// [suggestNewGoals] 为真时,还会让模型指出"哪些做完的事还没有对应的推进条",
+  /// 一次给你一批可以一键补上的目标。不传就不问——那只在看历史数据时才有意义。
+  Future<GoalMatchResult> match({
     required AiConfig config,
     required List<Goal> goals,
     required List<Task> tasks,
+    bool suggestNewGoals = true,
   }) async {
-    if (goals.isEmpty || tasks.isEmpty) return const [];
+    if (tasks.isEmpty) return const GoalMatchResult();
+    // 一条目标都没有时更该问"要不要建":这正是新用户第一次同步的情形。
+    if (goals.isEmpty && !suggestNewGoals) return const GoalMatchResult();
 
-    final goalsBlock = [
-      for (var i = 0; i < goals.length; i++)
-        // 没有目标值的推进条把"目标"写成"未设定":提示词里也说明这一点,
-        // 免得模型把 "-" 当成数字去凑。
-        '${i + 1} | ${goals[i].title} | '
-            '${goals[i].hasTarget ? Goal.formatAmount(goals[i].target!) : '未设定'} '
-            '| ${goals[i].unit.isEmpty ? '(未定)' : goals[i].unit} '
-            '| ${goals[i].period.label}',
-    ].join('\n');
+    final goalsBlock = goals.isEmpty
+        ? '(还没有任何推进条)'
+        : [
+            for (var i = 0; i < goals.length; i++)
+              // 没有目标值的推进条把"目标"写成"未设定":提示词里也说明这一点,
+              // 免得模型把 "-" 当成数字去凑。
+              '${i + 1} | ${goals[i].title} | '
+                  '${goals[i].hasTarget ? Goal.formatAmount(goals[i].target!) : '未设定'} '
+                  '| ${goals[i].unit.isEmpty ? '(未定)' : goals[i].unit} '
+                  '| ${goals[i].period.label}',
+          ].join('\n');
     final tasksBlock = [
       for (var i = 0; i < tasks.length; i++) '${i + 1} | ${tasks[i].text}',
     ].join('\n');
@@ -42,13 +50,22 @@ class GoalMatcher {
       jsonMode: true,
       history: [
         AiMessage.system(
-          goalMatchPrompt(goalsBlock: goalsBlock, tasksBlock: tasksBlock),
+          goalMatchPrompt(
+            goalsBlock: goalsBlock,
+            tasksBlock: tasksBlock,
+            suggestNewGoals: suggestNewGoals,
+          ),
         ),
-        AiMessage.user('请给出 json 格式的匹配结果。'),
+        AiMessage.user('请给出 json 格式的结果。'),
       ],
     );
 
-    return _parse(raw, goals: goals, tasks: tasks);
+    return _parse(
+      raw,
+      goals: goals,
+      tasks: tasks,
+      suggestNewGoals: suggestNewGoals,
+    );
   }
 
   /// 解析模型回包。
@@ -56,10 +73,11 @@ class GoalMatcher {
   /// 对模型输出做**宽松解析、严格校验**:JSON 外面可能裹着 ``` 代码块或多余文字,
   /// 编号必须落在真实范围内,amount 必须是正数。任何一条不合法就丢掉那一条,
   /// 而不是让整次同步失败——宁少不多,错一条比全崩更糟。
-  static List<ProgressSuggestion> _parse(
+  static GoalMatchResult _parse(
     String raw, {
     required List<Goal> goals,
     required List<Task> tasks,
+    bool suggestNewGoals = false,
   }) {
     final json = _extractJsonObject(raw);
     if (json == null) {
@@ -67,10 +85,40 @@ class GoalMatcher {
     }
 
     final matches = json['matches'];
-    if (matches is! List) return const [];
+    if (matches is! List && json['newGoals'] is! List) {
+      return const GoalMatchResult();
+    }
 
     final result = <ProgressSuggestion>[];
+    final newGoals = <NewGoalSuggestion>[];
     final usedTasks = <int>{};
+    if (matches is List) {
+      _collectMatches(
+        matches,
+        goals: goals,
+        tasks: tasks,
+        into: result,
+        usedTasks: usedTasks,
+      );
+    }
+    if (suggestNewGoals && json['newGoals'] is List) {
+      _collectNewGoals(
+        json['newGoals'] as List,
+        tasks: tasks,
+        into: newGoals,
+        usedTasks: usedTasks,
+      );
+    }
+    return GoalMatchResult(matches: result, newGoals: newGoals);
+  }
+
+  static void _collectMatches(
+    List<Object?> matches, {
+    required List<Goal> goals,
+    required List<Task> tasks,
+    required List<ProgressSuggestion> into,
+    required Set<int> usedTasks,
+  }) {
     for (final entry in matches) {
       if (entry is! Map) continue;
 
@@ -90,7 +138,7 @@ class GoalMatcher {
       // 没定过(比如「读xx书」建的时候没填)则接受模型从待办里读出来的单位,
       // 否则"读了30页"会显示成光秃秃的"推进 30"。
       final suggestedUnit = (entry['unit'] as String?)?.trim() ?? '';
-      result.add(
+      into.add(
         ProgressSuggestion(
           goalId: goal.id,
           goalTitle: goal.title,
@@ -102,7 +150,41 @@ class GoalMatcher {
         ),
       );
     }
-    return result;
+  }
+
+  /// 解析"建议新建"的那一批。
+  ///
+  /// 校验与匹配同样严格:标题不能空、任务编号必须在范围内、
+  /// 一条待办不能既算进已有推进条又参与新建(否则会重复计数)。
+  static void _collectNewGoals(
+    List<Object?> entries, {
+    required List<Task> tasks,
+    required List<NewGoalSuggestion> into,
+    required Set<int> usedTasks,
+  }) {
+    for (final entry in entries) {
+      if (entry is! Map) continue;
+      final title = (entry['title'] as String?)?.trim() ?? '';
+      if (title.isEmpty) continue;
+      final taskIndex = _asInt(entry['task']);
+      if (taskIndex == null) continue;
+      if (taskIndex < 1 || taskIndex > tasks.length) continue;
+      if (!usedTasks.add(taskIndex)) continue;
+
+      final task = tasks[taskIndex - 1];
+      final amount = _asDouble(entry['amount']) ?? 1;
+      final unit = (entry['unit'] as String?)?.trim() ?? '';
+      into.add(
+        NewGoalSuggestion(
+          title: title,
+          unit: unit,
+          amount: amount > 0 ? amount : 1,
+          reason: (entry['reason'] as String?)?.trim() ?? '',
+          taskId: task.id,
+          taskText: task.text,
+        ),
+      );
+    }
   }
 
   /// 从可能带杂质的文本里抠出第一个 JSON 对象。

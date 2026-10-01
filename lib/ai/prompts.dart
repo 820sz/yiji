@@ -149,7 +149,20 @@ String goalParsePrompt() {
 String goalMatchPrompt({
   required String goalsBlock,
   required String tasksBlock,
+  bool suggestNewGoals = true,
 }) {
+  final newGoalRules = suggestNewGoals
+      ? '''
+
+另外,如果他做完的事里有一些**明显值得追踪、但上面没有对应推进条**的,
+放到 "newGoals" 里问他一句要不要补上:
+- 每条给出 title(简短名字,2 到 8 个字)与 unit(计量单位)。
+- 一条待办只能出现在一个地方:已经算进上面某条推进条的,不要再放进 newGoals。
+- 只在他**重复在做同类的事**、或者明显是长期在做的事时才建议。
+  一次性的小事(取快递、交作业)不要建议建目标,否则他每次都会收到一堆噪音。
+- 没有值得补的就给空数组,不要为了凑数硬提。'''
+      : '';
+
   return '''
 你的任务:阅读用户已经做完的事,判断每件事让他的哪条"推进条"前进了多少。
 
@@ -179,15 +192,18 @@ unit 字段填你这次用的计量单位(如 页/次/公里/分钟/字)。它�
 只有确实推进了才写,拿不准就跳过——宁少不多,编出来的数字比漏掉更糟。
 一条待办最多匹配一条推进条。方向是减少的(比如体重),amount 填减少的量,正数。
 
-reason 里用一句人话说清这个数字是怎么来的,用户要靠它核对你的判断。
+reason 里用一句人话说清这个数字是怎么来的,用户要靠它核对你的判断。$newGoalRules
 
 请只输出 JSON,不要任何解释文字。格式:
 {
   "matches": [
     {"task": 1, "goal": 2, "amount": 30, "unit": "页", "reason": "待办里写了读到第 30 页"}
+  ],
+  "newGoals": [
+    {"task": 5, "title": "读书", "unit": "页", "reason": "这周读了三次书,但你没在追踪它"}
   ]
 }
 
-没有任何可匹配的项时,输出 {"matches": []}。
+没有任何可匹配的项时,输出 {"matches": [], "newGoals": []}。
 ''';
 }

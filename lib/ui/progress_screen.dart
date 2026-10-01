@@ -120,10 +120,6 @@ class ProgressScreen extends StatelessWidget {
       _toast(context, '还没填 API key,去「我的」里填一下');
       return;
     }
-    if (state.activeGoals.isEmpty) {
-      _toast(context, '先建一个目标');
-      return;
-    }
     try {
       final count = await state.requestProgressSuggestions();
       if (!context.mounted) return;
@@ -139,12 +135,19 @@ class ProgressScreen extends StatelessWidget {
   }
 
   /// 展示 AI 的建议,逐条可勾选,确认后才落库。
+  ///
+  /// 两类建议一起给:匹配到已有推进条的(加进度),和**建议新建目标的**
+  /// (做完的事里有一些还没有被追踪)。后者是用户最需要的那一步——
+  /// 他往往是先做事、后想起来要追踪,让他自己去建等于把活推回给他。
   Future<void> _reviewSuggestions(BuildContext context) async {
     final state = AppScope.of(context);
-    final accepted = await showModalBottomSheet<List<ProgressSuggestion>>(
+    final accepted = await showModalBottomSheet<_ReviewResult>(
       context: context,
       isScrollControlled: true,
-      builder: (_) => _SuggestionSheet(suggestions: state.suggestions),
+      builder: (_) => _SuggestionSheet(
+        suggestions: state.suggestions,
+        newGoals: state.newGoalSuggestions,
+      ),
     );
     if (accepted == null) {
       // 只是关掉面板,不要把结果删掉。
@@ -152,9 +155,16 @@ class ProgressScreen extends StatelessWidget {
       // 只能再花钱重跑一遍。留着,下次点同步时被新结果覆盖即可。
       return;
     }
-    final applied = await state.confirmSuggestions(accepted);
+
+    // 先建目标再记进度:新建的那些要把这次已完成的量一并记进去。
+    final created = await state.confirmNewGoals(accepted.newGoals);
+    final applied = await state.confirmSuggestions(accepted.matches);
     if (!context.mounted) return;
-    _toast(context, '推进了 $applied 项');
+    final parts = [
+      if (applied > 0) '推进了 $applied 项',
+      if (created > 0) '新建了 $created 个目标',
+    ];
+    _toast(context, parts.isEmpty ? '没有改动' : parts.join(','));
   }
 
   Future<void> _addManual(BuildContext context, Goal goal) async {
@@ -560,14 +570,29 @@ class _EmptyHint extends StatelessWidget {
   }
 }
 
+/// 用户在确认面板上勾出来的结果。
+class _ReviewResult {
+  const _ReviewResult({required this.matches, required this.newGoals});
+
+  final List<ProgressSuggestion> matches;
+  final List<NewGoalSuggestion> newGoals;
+}
+
 /// AI 建议的确认面板:逐条可勾选,理由可见。
 ///
 /// 把"为什么算这么多"显示出来是刻意的:他要能一眼判断 AI 有没有理解错,
 /// 而不是盲点确认。
+///
+/// 分两组:上面是"算进已有推进条",下面是"这些事还没有被追踪,要不要建目标"。
+/// 后者单独一块并说明白会新建什么,因为它的后果比加一条进度大。
 class _SuggestionSheet extends StatefulWidget {
-  const _SuggestionSheet({required this.suggestions});
+  const _SuggestionSheet({
+    required this.suggestions,
+    this.newGoals = const [],
+  });
 
   final List<ProgressSuggestion> suggestions;
+  final List<NewGoalSuggestion> newGoals;
 
   @override
   State<_SuggestionSheet> createState() => _SuggestionSheetState();
@@ -577,6 +602,14 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
   late final Set<int> _accepted = {
     for (var i = 0; i < widget.suggestions.length; i++) i,
   };
+
+  /// 建议新建的目标默认**全选**:这正是用户想要的"帮我补上",
+  /// 而且它比"改一条已有进度"的后果更可见(会多出一张卡片),容易发现。
+  late final Set<int> _acceptedNew = {
+    for (var i = 0; i < widget.newGoals.length; i++) i,
+  };
+
+  int get _total => _accepted.length + _acceptedNew.length;
 
   @override
   Widget build(BuildContext context) {
@@ -618,6 +651,40 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
                         if (!_accepted.remove(i)) _accepted.add(i);
                       }),
                     ),
+                  // 还没有被追踪的那些。放在下面并单独起一个标题:
+                  // 它的后果是"多出一张卡片",和上面那组不是一回事。
+                  if (widget.newGoals.isNotEmpty) ...[
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Icon(Icons.add_circle_outline, size: 16, color: textSecondary),
+                        const SizedBox(width: 6),
+                        Text(
+                          '这些事还没在追踪,要不要补上?',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: textPrimary,
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '勾选的会新建一条推进条,并把这次完成的数量一起记进去。',
+                      style: TextStyle(fontSize: 12.5, height: 1.5, color: textSecondary),
+                    ),
+                    const SizedBox(height: 8),
+                    for (var i = 0; i < widget.newGoals.length; i++)
+                      _NewGoalRow(
+                        suggestion: widget.newGoals[i],
+                        selected: _acceptedNew.contains(i),
+                        dark: dark,
+                        onToggle: () => setState(() {
+                          if (!_acceptedNew.remove(i)) _acceptedNew.add(i);
+                        }),
+                      ),
+                  ],
                 ],
               ),
             ),
@@ -640,14 +707,24 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
                 Expanded(
                   flex: 2,
                   child: FilledButton(
-                    onPressed: _accepted.isEmpty
+                    onPressed: _total == 0
                         ? null
                         : () => Navigator.pop(
                               context,
-                              [
-                                for (var i = 0; i < widget.suggestions.length; i++)
-                                  if (_accepted.contains(i)) widget.suggestions[i],
-                              ],
+                              _ReviewResult(
+                                matches: [
+                                  for (var i = 0;
+                                      i < widget.suggestions.length;
+                                      i++)
+                                    if (_accepted.contains(i))
+                                      widget.suggestions[i],
+                                ],
+                                newGoals: [
+                                  for (var i = 0; i < widget.newGoals.length; i++)
+                                    if (_acceptedNew.contains(i))
+                                      widget.newGoals[i],
+                                ],
+                              ),
                             ),
                     style: FilledButton.styleFrom(
                       padding: const EdgeInsets.symmetric(vertical: 13),
@@ -655,7 +732,7 @@ class _SuggestionSheetState extends State<_SuggestionSheet> {
                         borderRadius: BorderRadius.circular(12),
                       ),
                     ),
-                    child: Text('计入这 ${_accepted.length} 条'),
+                    child: Text('确认这 $_total 项'),
                   ),
                 ),
               ],
@@ -715,6 +792,96 @@ class _SuggestionRow extends StatelessWidget {
                           fontSize: 14.5,
                           fontWeight: FontWeight.w600,
                           color: textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        '来自待办:${suggestion.taskText}',
+                        style: TextStyle(fontSize: 12.5, color: textSecondary),
+                      ),
+                      if (suggestion.reason.isNotEmpty) ...[
+                        const SizedBox(height: 3),
+                        Text(
+                          suggestion.reason,
+                          style: TextStyle(
+                            fontSize: 12,
+                            height: 1.4,
+                            color: textSecondary.withValues(alpha: 0.85),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 一条"建议新建目标"的勾选项。
+///
+/// 与进度建议分开画:它左边是个加号而不是对勾,颜色也不同,
+/// 让人一眼看出"这一条会新建东西,而不是记一笔账"。
+class _NewGoalRow extends StatelessWidget {
+  const _NewGoalRow({
+    required this.suggestion,
+    required this.selected,
+    required this.dark,
+    required this.onToggle,
+  });
+
+  final NewGoalSuggestion suggestion;
+  final bool selected;
+  final bool dark;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
+
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Material(
+        color: surface,
+        borderRadius: BorderRadius.circular(14),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onToggle,
+          child: Padding(
+            padding: const EdgeInsets.all(13),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  selected ? Icons.check_box : Icons.check_box_outline_blank,
+                  size: 20,
+                  color: selected ? AppTheme.accent : textSecondary,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '新建「${suggestion.title}」',
+                        style: TextStyle(
+                          fontSize: 14.5,
+                          fontWeight: FontWeight.w600,
+                          color: textPrimary,
+                        ),
+                      ),
+                      const SizedBox(height: 3),
+                      Text(
+                        suggestion.label,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          color: AppTheme.accent,
                         ),
                       ),
                       const SizedBox(height: 3),

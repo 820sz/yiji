@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -8,11 +9,14 @@ import 'package:image_picker/image_picker.dart';
 import '../ai/ai_client.dart';
 import '../core/day.dart';
 import '../data/chat_attachment.dart';
+import '../data/chat_images.dart';
 import '../data/data_range.dart';
 import '../data/models.dart';
 import '../state/app_state.dart';
 import 'ai_avatar.dart';
 import 'chat_sidebar.dart';
+import 'identity_card.dart';
+import 'meme_sheet.dart';
 import 'theme.dart';
 
 /// 聊天页:一个配了自己 API key 的对话窗口。
@@ -166,8 +170,7 @@ class _ChatScreenState extends State<ChatScreen> {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _showAttachSheet() async {
-    final choice = await showModalBottomSheet<String>(
+  Future<void> _showAttachSheet() async {    final choice = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
@@ -190,6 +193,26 @@ class _ChatScreenState extends State<ChatScreen> {
     );
     if (choice == null || !mounted) return;
     await _pickFiles(imagesOnly: choice == 'image');
+  }
+
+  /// 从内置图库里挑一张表情包,加进待发列表。
+  Future<void> _pickMeme() async {
+    final picked = await showMemeSheet(context);
+    if (picked == null || !mounted) return;
+    setState(() => _attachments.add(picked));
+  }
+
+  /// 换这个对话的 AI 头像。
+  Future<void> _editConversationAvatar() async {
+    final state = AppScope.of(context);
+    await pickImageInto(
+      context,
+      title: '换这个对话的头像',
+      onPicked: state.saveConversationAvatar,
+      onRemove: state.currentConversationAvatar == null
+          ? null
+          : () => state.saveConversationAvatar(null),
+    );
   }
 
   /// 仅对本次对话生效的思考强度;null 表示跟随设置。
@@ -251,8 +274,12 @@ class _ChatScreenState extends State<ChatScreen> {
         .listen(
       (chunk) {
         if (!mounted) return;
-        // 回答开始吐出之后才跟随滚动;思考阶段不跟随,否则正文还没出现页面就在抖。
-        setState(() {});
+        // **不在这里 setState**。
+        //
+        // 每个分片重建整页(头部、输入框、整个消息列表)是"回答生成时页面
+        // 乱飘"的根因:几十个分片就是几十次全量重建,任何一处尺寸变化都会
+        // 被放大成抖动。正文由 _StreamingSlot 自己订阅 streamTick 重绘,
+        // 这里只负责跟随滚动。
         if (!chunk.isReasoning) _scrollToBottom();
       },
       onError: (Object error) {
@@ -319,6 +346,8 @@ class _ChatScreenState extends State<ChatScreen> {
       model: state.aiConfig.model,
       baseUrl: state.aiConfig.baseUrl,
     );
+    // 这个对话自己的头像;没设过时回落到全局设置里那个。
+    final aiAvatar = state.currentConversationAvatar ?? state.avatarBytes;
 
     return Scaffold(
       // 侧边栏挂在这里:会话列表要从左边滑出来,而且不该占着正文的位置。
@@ -330,11 +359,12 @@ class _ChatScreenState extends State<ChatScreen> {
           _ChatHeader(
             provider: provider,
             model: state.aiConfig.model,
-            avatar: state.avatarBytes,
-            dark: dark,
+            // 这个对话自己的头像;没设过时回落到全局设置里那个。
+            avatar: state.currentConversationAvatar ?? state.avatarBytes,            dark: dark,
             thinking: thinking,
             followingSettings: _overrideThinking == null,
             onOpenSidebar: () => _scaffoldKey.currentState?.openDrawer(),
+            onEditAvatar: _editConversationAvatar,
             onPickThinking: (level) => setState(
               () => _overrideThinking =
                   level == state.aiConfig.thinking ? null : level,
@@ -363,7 +393,7 @@ class _ChatScreenState extends State<ChatScreen> {
                         key: ValueKey('message-${message.id}'),
                         message: message,
                         provider: provider,
-                        avatar: state.avatarBytes,
+                        avatar: aiAvatar,
                         userAvatar: state.userAvatarBytes,
                         userName: state.identityLabel,
                         dark: dark,
@@ -397,6 +427,7 @@ class _ChatScreenState extends State<ChatScreen> {
             onPickRange: () => _pickRange(),
             onClearRange: () => setState(() => _attachRange = null),
             onAttach: _showAttachSheet,
+            onMeme: _pickMeme,
             onRemoveAttachment: (index) => setState(() => _attachments.removeAt(index)),
             onSend: _send,
           ),
@@ -428,9 +459,10 @@ class _StreamingSlot extends StatelessWidget {
       animation: state.streamTick,
       builder: (context, _) => _StreamingBlock(
         reasoning: state.streamingReasoning,
-        answer: state.streamingAnswer,
+        // 用可见版本:模型要表情包那行指令不能显示出来。
+        answer: state.visibleStreamingAnswer,
         provider: provider,
-        avatar: state.avatarBytes,
+        avatar: state.currentConversationAvatar ?? state.avatarBytes,
         dark: dark,
       ),
     );
@@ -448,6 +480,7 @@ class _ChatHeader extends StatelessWidget {
     required this.followingSettings,
     required this.onOpenSidebar,
     required this.onPickThinking,
+    required this.onEditAvatar,
     required this.onClear,
   });
 
@@ -465,6 +498,9 @@ class _ChatHeader extends StatelessWidget {
   final ValueChanged<ThinkingLevel> onPickThinking;
   final VoidCallback? onClear;
 
+  /// 点头像换这个对话的 AI 头像。
+  final VoidCallback onEditAvatar;
+
   @override
   Widget build(BuildContext context) {
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
@@ -480,11 +516,16 @@ class _ChatHeader extends StatelessWidget {
             icon: Icon(Icons.menu, color: textPrimary),
             tooltip: '全部对话',
           ),
-          AiAvatar(
-            provider: provider,
-            bytes: avatar,
-            dark: dark,
-            size: 34,
+          // 头像点一下就能换。头像是**每个对话各自**的:不同主题的对话
+          // 可以是不同的人设,不用全局改来改去。
+          GestureDetector(
+            onTap: onEditAvatar,
+            child: AiAvatar(
+              provider: provider,
+              bytes: avatar,
+              dark: dark,
+              size: 34,
+            ),
           ),
           const SizedBox(width: 10),
           Expanded(
@@ -919,6 +960,11 @@ class _Bubble extends StatelessWidget {
     // 两侧都要放头像,所以气泡可用宽度要比只有一侧时更窄一点。
     final maxWidth = MediaQuery.of(context).size.width * 0.68;
 
+    // 正文里可能夹着图片行(`![图] <引用>`)。要把它们**画成图**,
+    // 而不是把那一行当文字显示出来——用户发的是照片,不是文件名。
+    final parts = splitMessageParts(text);
+    final hasImage = parts.any((part) => part.image != null);
+
     return Padding(
       padding: const EdgeInsets.only(bottom: 10),
       child: Row(
@@ -931,19 +977,39 @@ class _Bubble extends StatelessWidget {
           ],
           Flexible(
             child: Container(
-              constraints: BoxConstraints(maxWidth: maxWidth),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 11),
+              // 图片要占满更宽的位置,所以有图时放宽到 0.72 屏宽。
+              constraints: BoxConstraints(maxWidth: hasImage ? maxWidth * 1.15 : maxWidth),
+              padding: EdgeInsets.symmetric(
+                horizontal: hasImage ? 8 : 14,
+                vertical: hasImage ? 8 : 11,
+              ),
               decoration: BoxDecoration(
                 color: isUser ? AppTheme.accent : surface,
                 borderRadius: BorderRadius.circular(16),
               ),
-              child: SelectableText(
-                text,
-                style: TextStyle(
-                  fontSize: 15,
-                  height: 1.62,
-                  color: isUser ? Colors.white : textPrimary,
-                ),
+              child: Column(
+                crossAxisAlignment:
+                    isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                children: [
+                  for (final part in parts)
+                    if (part.image != null)
+                      _MessageImage(image: part.image!, isUser: isUser)
+                    else if (part.text.trim().isNotEmpty)
+                      Padding(
+                        padding: EdgeInsets.symmetric(
+                          horizontal: hasImage ? 6 : 0,
+                          vertical: hasImage ? 3 : 0,
+                        ),
+                        child: SelectableText(
+                          part.text.trim(),
+                          style: TextStyle(
+                            fontSize: 15,
+                            height: 1.62,
+                            color: isUser ? Colors.white : textPrimary,
+                          ),
+                        ),
+                      ),
+                ],
               ),
             ),
           ),
@@ -967,6 +1033,190 @@ class _Bubble extends StatelessWidget {
   }
 }
 
+/// 消息正文的一段:要么是一段文字,要么是一张图。
+class MessagePart {
+  const MessagePart.text(this.text) : image = null;
+  const MessagePart.image(this.image) : text = '';
+
+  final String text;
+  final ChatImage? image;
+}
+
+/// 把消息正文按图片标记切成若干段。
+///
+/// 图片单独成行(`![图] <引用>`),所以按行扫一遍就够了。
+/// 之所以在渲染层切而不是在存储层存两份:消息文本本身就是"回看时到底发了什么"
+/// 的完整记录,一份数据一个来源,不会再出现"文本和附件对不上"。
+List<MessagePart> splitMessageParts(String raw) {
+  final parts = <MessagePart>[];
+  final buffer = StringBuffer();
+
+  void flush() {
+    final text = buffer.toString();
+    if (text.trim().isNotEmpty) parts.add(MessagePart.text(text));
+    buffer.clear();
+  }
+
+  for (final line in raw.split('\n')) {
+    final image = ChatImage.parse(line);
+    if (image == null) {
+      buffer.writeln(line);
+      continue;
+    }
+    flush();
+    parts.add(MessagePart.image(image));
+  }
+  flush();
+  return parts;
+}
+
+/// 气泡里的一张图。
+///
+/// 两种来源:内置表情包(asset)和用户自己发的图(应用私有目录里的文件)。
+/// 点一下看大图——缩略图尺寸有限,想看清还得能放大。
+class _MessageImage extends StatelessWidget {
+  const _MessageImage({required this.image, required this.isUser});
+
+  final ChatImage image;
+  final bool isUser;
+
+  @override
+  Widget build(BuildContext context) {
+    final source = image.isAsset
+        ? Image.asset(
+            'assets/${image.assetPath}',
+            fit: BoxFit.contain,
+            errorBuilder: (context, error, stack) => _broken(context),
+          )
+        : FutureBuilder<File?>(
+            future: ChatImages.file(image.fileName),
+            builder: (context, snapshot) {
+              final file = snapshot.data;
+              if (file == null) {
+                // 还没查到 / 文件不在了:先占位,避免闪一下空白。
+                return snapshot.connectionState == ConnectionState.done
+                    ? _broken(context)
+                    : const SizedBox(height: 120);
+              }
+              return Image.file(
+                file,
+                fit: BoxFit.contain,
+                errorBuilder: (context, error, stack) => _broken(context),
+              );
+            },
+          );
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 3),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(12),
+        child: GestureDetector(
+          onTap: () => _openFullScreen(context, image),
+          child: ConstrainedBox(
+            // 缩略图不让它撑满整屏:聊天记录要能一眼扫过。
+            constraints: const BoxConstraints(maxHeight: 240, maxWidth: 240),
+            child: source,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _broken(BuildContext context) {
+    final textSecondary =
+        Theme.of(context).brightness == Brightness.dark
+            ? AppTheme.darkTextSecondary
+            : AppTheme.lightTextSecondary;
+    return Container(
+      width: 120,
+      height: 90,
+      alignment: Alignment.center,
+      color: Colors.black12,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.broken_image_outlined, size: 22, color: textSecondary),
+          const SizedBox(height: 4),
+          Text(
+            '图不在了',
+            style: TextStyle(fontSize: 11.5, color: textSecondary),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 点开看大图。
+Future<void> _openFullScreen(BuildContext context, ChatImage image) async {
+  await Navigator.of(context).push<void>(
+    MaterialPageRoute(
+      builder: (_) => _FullImagePage(image: image),
+    ),
+  );
+}
+
+class _FullImagePage extends StatelessWidget {
+  const _FullImagePage({required this.image});
+
+  final ChatImage image;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.black,
+      appBar: AppBar(
+        backgroundColor: Colors.black,
+        foregroundColor: Colors.white,
+        elevation: 0,
+      ),
+      body: Center(
+        child: InteractiveViewer(
+          maxScale: 5,
+          child: image.isAsset
+              ? Image.asset('assets/${image.assetPath}', fit: BoxFit.contain)
+              : FutureBuilder<File?>(
+                  future: ChatImages.file(image.fileName),
+                  builder: (context, snapshot) {
+                    final file = snapshot.data;
+                    if (file == null) {
+                      return const Text(
+                        '图不在了',
+                        style: TextStyle(color: Colors.white70),
+                      );
+                    }
+                    return Image.file(file, fit: BoxFit.contain);
+                  },
+                ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 只渲染一个气泡,给测试用。
+///
+/// 测试要验证"图片消息画的是图,不是 `![图] 文件名` 这行字"。
+/// 为了这一条去启动整个 app(要 key、要存储、要平台通道)代价太大,
+/// 所以把气泡单独暴露出来。
+class ChatBubbleProbe extends StatelessWidget {
+  const ChatBubbleProbe({super.key, required this.text, this.isUser = true});
+
+  final String text;
+  final bool isUser;
+
+  @override
+  Widget build(BuildContext context) {
+    return _Bubble(
+      text: text,
+      isUser: isUser,
+      dark: Theme.of(context).brightness == Brightness.dark,
+      provider: AiProvider.unknown,
+      avatar: null,
+    );
+  }
+}
+
 /// 底部输入区,含"带上近期数据"的范围选择与附件。
 class _Composer extends StatelessWidget {
   const _Composer({
@@ -978,6 +1228,7 @@ class _Composer extends StatelessWidget {
     required this.onPickRange,
     required this.onClearRange,
     required this.onAttach,
+    required this.onMeme,
     required this.onRemoveAttachment,
     required this.onSend,
   });
@@ -990,6 +1241,7 @@ class _Composer extends StatelessWidget {
   final VoidCallback onPickRange;
   final VoidCallback onClearRange;
   final VoidCallback onAttach;
+  final VoidCallback onMeme;
   final ValueChanged<int> onRemoveAttachment;
   final Future<void> Function() onSend;
 
@@ -1095,6 +1347,13 @@ class _Composer extends StatelessWidget {
                 onPressed: sending ? null : onAttach,
                 icon: Icon(Icons.add_photo_alternate_outlined, color: textSecondary),
                 tooltip: '加图片或文件',
+              ),
+              // 表情包。和"加附件"分成两个按钮:一个是发自己的文件,
+              // 一个是从内置图库里挑,用户的心智不一样。
+              IconButton(
+                onPressed: sending ? null : onMeme,
+                icon: Icon(Icons.emoji_emotions_outlined, color: textSecondary),
+                tooltip: '发表情包',
               ),
               Expanded(
                 child: TextField(

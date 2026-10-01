@@ -139,16 +139,19 @@ void main() {
   });
 
   group('解析模型回包', () {
+    /// 只取"匹配到已有推进条"那部分;这一组不测"建议新建"。
     Future<List<ProgressSuggestion>> matchWith(
       String reply, {
       String unit = '',
-    }) {
+    }) async {
       final matcher = GoalMatcher(AiClient(httpClient: _JsonAi(reply)));
-      return matcher.match(
+      final result = await matcher.match(
         config: _flash,
         goals: [readingGoal(unit: unit)],
         tasks: [readingTask()],
+        suggestNewGoals: false,
       );
+      return result.matches;
     }
 
     test('没有目标值的推进条也能拿到推进量', () async {
@@ -236,6 +239,128 @@ void main() {
       expect(prompt, contains('不要为了凑数编一个'));
       // 不能再出现"读不出数值就失败"这种把没目标值的目标挡在门外的条件。
       expect(prompt.contains('根本读不出目标数值或目标事物'), isFalse);
+    });
+  });
+
+  group('AI 建议补充新目标', () {
+    late FakeStore store;
+    late _JsonAi ai;
+
+    Future<AppState> boot(String reply) async {
+      SharedPreferences.setMockInitialValues({'ai_api_key': 'sk-test'});
+      ai = _JsonAi(reply);
+      final state = AppState(
+        store: store,
+        reports: ReportService(store),
+        settings: await SettingsStore.load(),
+        aiClient: AiClient(httpClient: ai),
+        updater: AppUpdater(
+          httpClient: _JsonAi('{"matches":[]}'),
+          owner: 'o',
+          repo: 'r',
+        ),
+      );
+      await state.bootstrap();
+      return state;
+    }
+
+    Future<void> settle(AppState state) async {
+      for (var i = 0; i < 30 && state.newGoalSuggestions.isEmpty; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+    }
+
+    setUp(() => store = FakeStore());
+
+    test('做完的事没被追踪时,会建议建一个新目标', () async {
+      // 用户改了名字但没建目标的典型情形:读了一周的书,进度里一片空白。
+      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final state = await boot(
+        '{"matches":[],"newGoals":[{"task":1,"title":"读书",'
+        '"unit":"页","reason":"这周在读,但没在追踪"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settle(state);
+
+      expect(state.newGoalSuggestions, hasLength(1));
+      final suggestion = state.newGoalSuggestions.single;
+      expect(suggestion.title, '读书');
+      expect(suggestion.unit, '页');
+      // 建议里要带上这次已完成的数量,确认后一起记进去。
+      expect(suggestion.amount, greaterThan(0));
+    });
+
+    test('确认后目标被建出来,并且这次的数量已经记上', () async {
+      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final state = await boot(
+        '{"matches":[],"newGoals":[{"task":1,"title":"读书",'
+        '"unit":"页","reason":"在读了"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settle(state);
+      final created = await state.confirmNewGoals(
+        List.of(state.newGoalSuggestions),
+      );
+
+      expect(created, 1);
+      final goal = state.activeGoals.firstWhere((g) => g.title == '读书');
+      // 记住:用户没定过目标值,所以这应该是一条**推进条**而不是进度条。
+      expect(goal.hasTarget, isFalse);
+      expect(goal.unit, '页');
+      // 已经完成的量要跟着记进去,不用他再手动补一遍。
+      expect(goal.current, greaterThan(0));
+    });
+
+    test('不勾选就不会建', () async {
+      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final state = await boot(
+        '{"matches":[],"newGoals":[{"task":1,"title":"读书","unit":"页"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settle(state);
+      expect(state.newGoalSuggestions, hasLength(1));
+
+      // 面板上点"都不算"= 什么都不确认。
+      await state.confirmNewGoals(const []);
+      expect(state.activeGoals.where((g) => g.title == '读书'), isEmpty);
+    });
+
+    test('已经算进某条推进条的事,不会再被建议新建', () async {
+      // 否则同一件事会被记两次:一次算进老目标,一次算进新建的。
+      store.seedGoal(title: '小说推进', unit: '字', target: 10000, current: 0);
+      final task = store.seedTask('2026-09-29', '码字2k');
+      final state = await boot(
+        '{"matches":[{"task":1,"goal":1,"amount":2000,"unit":"字"}],'
+        '"newGoals":[{"task":1,"title":"写作","unit":"字"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settle(state);
+
+      expect(state.suggestions, hasLength(1));
+      expect(
+        state.newGoalSuggestions,
+        isEmpty,
+        reason: '同一条待办不能既算进已有目标又被建议新建',
+      );
+    });
+
+    test('越界或没标题的建议被丢掉', () async {
+      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final state = await boot(
+        '{"matches":[],"newGoals":['
+        '{"task":9,"title":"不存在的待办"},'
+        '{"task":1,"title":"   "},'
+        '{"task":1,"title":"读书","unit":"页"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settle(state);
+      expect(state.newGoalSuggestions, hasLength(1));
+      expect(state.newGoalSuggestions.single.title, '读书');
     });
   });
 
@@ -351,8 +476,7 @@ void main() {
       expect(state.suggestions.single.amount, 30);
     });
 
-    test('一条待办只会被算一次', () async {
-      // 用户最可能做的动作是取消勾选再勾回来。那样不该又加 30 页。
+    test('一条待办只会被算一次', () async {      // 用户最可能做的动作是取消勾选再勾回来。那样不该又加 30 页。
       store.seedGoal(title: '读《义忆》', unit: '页', current: 0);
       final task = store.seedTask('2026-09-29', '读到第 30 页');
       final state = await boot(

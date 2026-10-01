@@ -419,7 +419,7 @@ void main() {
       // 此刻还没落库。
       expect(find.text('0 / 1万 字'), findsOneWidget);
 
-      await tester.tap(find.text('计入这 1 条'));
+      await tester.tap(find.text('确认这 1 项'));
       await tester.pumpAndSettle();
 
       final updated = (await store.goals()).firstWhere((g) => g.id == goal.id);
@@ -443,9 +443,9 @@ void main() {
       await tester.tap(find.text('小说推进  +2000 字'));
       await tester.pumpAndSettle();
 
-      expect(find.text('计入这 0 条'), findsOneWidget);
+      expect(find.text('确认这 0 项'), findsOneWidget);
       final button = tester.widget<FilledButton>(
-        find.widgetWithText(FilledButton, '计入这 0 条'),
+        find.widgetWithText(FilledButton, '确认这 0 项'),
       );
       expect(button.onPressed, isNull);
     });

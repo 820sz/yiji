@@ -102,6 +102,10 @@ class AppState extends ChangeNotifier {
   List<ProgressSuggestion> _suggestions = const [];
   List<ProgressSuggestion> get suggestions => _suggestions;
 
+  /// AI 建议新建的目标(做完的事里有一些还没被任何推进条覆盖)。
+  List<NewGoalSuggestion> _newGoalSuggestions = const [];
+  List<NewGoalSuggestion> get newGoalSuggestions => _newGoalSuggestions;
+
   bool _matching = false;
   bool get matching => _matching;
 
@@ -674,11 +678,13 @@ class AppState extends ChangeNotifier {
   /// 让 AI 读本周已完成的待办,给出进度推进建议。
   ///
   /// 只出建议、不落库:确认这一步留给用户,见 [confirmSuggestions]。
+  /// 除了"匹配到已有推进条",还会带回"建议新建目标"那一类——用户常常是
+  /// 先做事、后想起来要追踪,让他自己去建等于把 AI 该干的活推回给他。
   Future<int> requestProgressSuggestions() async {
     if (!aiConfig.isUsable) {
       throw AiException('还没填 API key,去设置里填一下');
     }
-    if (activeGoals.isEmpty) return 0;
+    // 一条目标都没有时也要问:那正是"要不要建第一条"的时机,不能提前返回。
 
     _matching = true;
     notifyListeners();
@@ -689,14 +695,17 @@ class AppState extends ChangeNotifier {
       );
       if (tasks.isEmpty) {
         _suggestions = const [];
+        _newGoalSuggestions = const [];
         return 0;
       }
-      _suggestions = await _matcher.match(
+      final result = await _matcher.match(
         config: aiConfig,
         goals: activeGoals,
         tasks: tasks,
       );
-      return _suggestions.length;
+      _suggestions = result.matches;
+      _newGoalSuggestions = result.newGoals;
+      return result.length;
     } finally {
       _matching = false;
       notifyListeners();
@@ -726,14 +735,48 @@ class AppState extends ChangeNotifier {
     return accepted.length;
   }
 
+  /// 把用户勾选的"建议新建的目标"建出来,并把这次已完成的推进量一并记上。
+  ///
+  /// 建完之后立刻记进度,而不是建一个空目标:这些量的来源是**已经做完的事**,
+  /// 让用户建完再手动补一遍,正是这个功能想省掉的那步。
+  Future<int> confirmNewGoals(List<NewGoalSuggestion> accepted) async {
+    for (final suggestion in accepted) {
+      final goalId = await _store.addGoal(
+        title: suggestion.title,
+        unit: suggestion.unit,
+        // 不设目标值:他做这件事之前并没有定过要推进到多少,
+        // 硬填一个数是替用户做决定,而且会凭空出现一个"进度条"。
+        // 没有目标值就是推进条——正是用户要的那种。
+        target: null,
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.blue,
+      );
+      await _store.addProgress(
+        goalId: goalId,
+        amount: suggestion.amount,
+        day: _currentDay,
+        note: suggestion.taskText,
+        taskId: suggestion.taskId,
+        source: 'ai',
+      );
+    }
+    _newGoalSuggestions = const [];
+    await refreshGoals();
+    return accepted.length;
+  }
+
   /// 打完钩之后自动跑一次 AI 量化。
   ///
   /// 这是这个功能的正常路径:用户不需要记得去点什么按钮,勾完就有进度。
   /// 出错的代价很低——落库前会把结果摆出来给他确认,判断错了也能改。
-  /// 没配 key、没建目标、正在跑,都安静地跳过。
+  /// 没配 key、正在跑,都安静地跳过。
+  ///
+  /// **一条目标都没有时也要跑**:那种情况正是"要不要建第一条推进条"的时机,
+  /// 提前返回等于让新用户永远看不到这个功能。
   Future<void> _autoSyncProgress() async {
     if (_autoSyncing || _matching) return;
-    if (!aiConfig.isUsable || activeGoals.isEmpty) return;
+    if (!aiConfig.isUsable) return;
     _autoSyncing = true;
     try {
       final count = await requestProgressSuggestions();
@@ -747,6 +790,7 @@ class AppState extends ChangeNotifier {
 
   void dismissSuggestions() {
     _suggestions = const [];
+    _newGoalSuggestions = const [];
     notifyListeners();
   }
 
@@ -856,6 +900,12 @@ class AppState extends ChangeNotifier {
   /// 头像是**每个会话各自**的:不同对话可以是不同的人设。
   Uint8List? get currentConversationAvatar =>
       _decodeAvatar(currentConversation?.avatar ?? '');
+
+  /// 某个会话的头像;它自己没设过就回落到全局那个。
+  ///
+  /// 侧边栏要在每条对话上显示头像,所以这里按会话取,而不是只看当前那个。
+  Uint8List? avatarOf(Conversation conversation) =>
+      _decodeAvatar(conversation.avatar) ?? _settings.avatarBytes;
 
   Conversation? get currentConversation {
     for (final conversation in _conversations) {

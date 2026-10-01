@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/models.dart';
 import '../state/app_state.dart';
+import 'ai_avatar.dart';
 import 'prompt_dialog.dart';
 import 'theme.dart';
 
@@ -23,6 +24,10 @@ class ChatSidebar extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final provider = AiProvider.from(
+      model: state.aiConfig.model,
+      baseUrl: state.aiConfig.baseUrl,
+    );
 
     return Drawer(
       backgroundColor: dark ? AppTheme.darkBackground : AppTheme.lightBackground,
@@ -72,11 +77,15 @@ class ChatSidebar extends StatelessWidget {
                           conversation: conversation,
                           active: conversation.id == state.currentConversationId,
                           dark: dark,
+                          // 每条对话显示它自己的 AI 头像:不同对话可以是不同人设,
+                          // 光看标题分不出"这是哪个 AI"。
+                          provider: provider,
+                          avatar: state.avatarOf(conversation),
                           onTap: () {
                             state.openConversation(conversation.id);
                             onClose();
                           },
-                          onDelete: () => state.deleteConversation(conversation.id),
+                          onDelete: () => _confirmDelete(context, conversation),
                           onRename: () => _rename(context, conversation),
                         );
                       },
@@ -100,6 +109,39 @@ class ChatSidebar extends StatelessWidget {
     );
     if (result != null) await state.renameConversation(conversation.id, result);
   }
+
+  /// 删对话前问一句。
+  ///
+  /// 删掉是整个会话连同里面所有消息,不可恢复;而侧边栏里那一行很小,
+  /// 误触的代价太大,所以加一次确认。
+  Future<void> _confirmDelete(
+    BuildContext context,
+    Conversation conversation,
+  ) async {
+    final state = AppScope.of(context);
+    final title = conversation.title.trim().isEmpty ? '新对话' : conversation.title;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删除这个对话?'),
+        content: Text(
+          '「$title」里的 ${conversation.messageCount} 条消息会一起删掉,不能恢复。',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除', style: TextStyle(color: Color(0xFFE05252))),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await state.deleteConversation(conversation.id);
+  }
 }
 
 class _ConversationTile extends StatelessWidget {
@@ -107,6 +149,8 @@ class _ConversationTile extends StatelessWidget {
     required this.conversation,
     required this.active,
     required this.dark,
+    required this.provider,
+    required this.avatar,
     required this.onTap,
     required this.onDelete,
     required this.onRename,
@@ -115,6 +159,8 @@ class _ConversationTile extends StatelessWidget {
   final Conversation conversation;
   final bool active;
   final bool dark;
+  final AiProvider provider;
+  final Uint8List? avatar;
   final VoidCallback onTap;
   final VoidCallback onDelete;
   final VoidCallback onRename;
@@ -137,22 +183,34 @@ class _ConversationTile extends StatelessWidget {
             padding: const EdgeInsets.fromLTRB(12, 10, 4, 10),
             child: Row(
               children: [
-                Icon(
-                  Icons.chat_bubble_outline,
-                  size: 16,
-                  color: active ? AppTheme.accent : textSecondary,
+                // 头像 + 标题。头像让"这是哪个对话"一眼可辨,不必读标题。
+                AiAvatar(
+                  provider: provider,
+                  bytes: avatar,
+                  dark: dark,
+                  size: 26,
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text(
-                    title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: active ? FontWeight.w600 : FontWeight.w400,
-                      color: active ? AppTheme.accent : textPrimary,
-                    ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: active ? FontWeight.w600 : FontWeight.w400,
+                          color: active ? AppTheme.accent : textPrimary,
+                        ),
+                      ),
+                      if (conversation.messageCount > 0)
+                        Text(
+                          '${conversation.messageCount} 条',
+                          style: TextStyle(fontSize: 11.5, color: textSecondary),
+                        ),
+                    ],
                   ),
                 ),
                 PopupMenuButton<String>(

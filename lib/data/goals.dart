@@ -358,3 +358,55 @@ class ProgressSuggestion {
   /// 展示用:`+2000 字`。
   String get amountLabel => '+${Goal.formatAmount(amount)} $unit';
 }
+
+/// AI 建议**新建**的一条推进条。
+///
+/// 存在的理由:用户常常是"先做事、后想起来要追踪"。等他做完一周的读书,
+/// 才发现进度里根本没有"读书"这一条——那时让他自己去建、再手动把这一周的
+/// 推进量补回去,等于把 AI 该干的活推回给他。
+class NewGoalSuggestion {
+  const NewGoalSuggestion({
+    required this.title,
+    required this.unit,
+    required this.amount,
+    required this.reason,
+    required this.taskId,
+    required this.taskText,
+  });
+
+  /// 建议的目标名,如「读书」。
+  final String title;
+
+  /// 建议的计量单位,可能为空。
+  final String unit;
+
+  /// 这次已经完成的推进量(建目标时一并记进去)。
+  final double amount;
+
+  final String reason;
+  final int taskId;
+  final String taskText;
+
+  /// 展示用:`读书 · 先记 30 页`。
+  String get label {
+    final amountText = Goal.formatAmount(amount);
+    return unit.isEmpty ? '$title · 先记 $amountText' : '$title · 先记 $amountText $unit';
+  }
+}
+
+/// 一次 AI 同步的完整结果。
+///
+/// 分成两类是因为处置方式不同:匹配到已有目标的直接加进度;
+/// 建议新建的还要先建出目标来。
+class GoalMatchResult {
+  const GoalMatchResult({
+    this.matches = const [],
+    this.newGoals = const [],
+  });
+
+  final List<ProgressSuggestion> matches;
+  final List<NewGoalSuggestion> newGoals;
+
+  bool get isEmpty => matches.isEmpty && newGoals.isEmpty;
+  int get length => matches.length + newGoals.length;
+}

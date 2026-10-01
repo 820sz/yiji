@@ -59,9 +59,26 @@ void main() {
       );
 
   group('真实 API:进度匹配', () {
-    test('常规写法:码字2k → +2000 字', () async {
+    /// 只取"匹配到已有推进条"的那部分结果。
+    ///
+    /// `match` 现在还会带回"建议新建的目标"(那是另一条处置路径),
+    /// 这一组测的是匹配本身,所以取 `.matches`。
+    Future<List<ProgressSuggestion>> matchOnly({
+      required List<Goal> goals,
+      required List<Task> tasks,
+    }) async {
       final result = await matcher.match(
         config: config,
+        goals: goals,
+        tasks: tasks,
+        // 这一组不测"建议新建",关掉免得噪音混进来。
+        suggestNewGoals: false,
+      );
+      return result.matches;
+    }
+
+    test('常规写法:码字2k → +2000 字', () async {
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [doneTask(1, '上午 码字2k')],
       );
@@ -72,8 +89,7 @@ void main() {
     });
 
     test('灵活写法:码了两千字 → 也能算出 2000', () async {
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [doneTask(1, '上午寝室 码了两千字')],
       );
@@ -83,8 +99,7 @@ void main() {
     });
 
     test('另一种灵活写法:写了 3k 字 → 3000', () async {
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [doneTask(1, '下午 写了3k字')],
       );
@@ -94,8 +109,7 @@ void main() {
     });
 
     test('没有数字、也不是"做一次算一个单位"的,不该硬算进进度', () async {
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [
           doneTask(1, '下午 健身'),
@@ -124,8 +138,7 @@ void main() {
         active: true,
         createdAt: DateTime(2026, 9, 25),
       );
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [strength],
         tasks: [doneTask(1, '下午 健身(胸+三头)')],
       );
@@ -136,8 +149,7 @@ void main() {
     });
 
     test('无关的事不会被算进来', () async {
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [doneTask(1, '下午 跑了5公里')],
       );
@@ -146,8 +158,7 @@ void main() {
     });
 
     test('混合场景:只挑出该算的那些', () async {
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: [writingGoal()],
         tasks: [
           doneTask(1, '上午 码字2k'),
@@ -183,8 +194,7 @@ void main() {
           createdAt: DateTime(2026, 9, 25),
         ),
       ];
-      final result = await matcher.match(
-        config: config,
+      final result = await matchOnly(
         goals: goals,
         tasks: [
           doneTask(1, '上午 码字2k'),
