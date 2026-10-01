@@ -321,6 +321,9 @@ class FakeStore implements RecordStore {
         Conversation(
           id: conversation.id,
           title: conversation.title,
+          // 漏掉 avatar 会让"每个对话有自己的头像"这条永远看起来是坏的:
+          // 写进去了、读出来没了,而生产实现没有这个问题。
+          avatar: conversation.avatar,
           createdAt: conversation.createdAt,
           updatedAt: conversation.updatedAt,
           messageCount: _messages.where((m) => m.conversationId == conversation.id).length,

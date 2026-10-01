@@ -532,7 +532,8 @@ class _Header extends StatelessWidget {
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
     final isToday = day == todayKey();
 
-    if (selecting) {
+    // 多选和排序共用顶部这条替换栏:两者都是"临时换个模式",退出方式一样。
+    if (selecting || reordering) {
       return Padding(
         padding: const EdgeInsets.fromLTRB(4, 6, 4, 8),
         child: Row(
@@ -560,7 +561,9 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 child: Text(
-                  reordering ? '拖动右侧把手排序' : '已选择 $selectedCount 项',
+                  reordering
+                      ? '按住任意一条拖动排序'
+                      : '已选择 $selectedCount 项',
                   key: ValueKey('$reordering-$selectedCount'),
                   textAlign: TextAlign.center,
                   style: TextStyle(

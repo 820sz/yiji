@@ -572,6 +572,89 @@ void main() {
     });
   });
 
+  // ---------- 任务页的滑动与拖动 ----------
+
+  group('任务卡片的手势', () {
+    testWidgets('左滑是标记完成,不是删除', (tester) async {
+      // 用户明确要求过:向左划应该是"完成",删除是另一个方向。
+      final task = store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+
+      // 左滑 = 从右往左拖。
+      await tester.drag(find.text('待办甲'), const Offset(-400, 0));
+      await tester.pumpAndSettle();
+
+      final updated = (await store.tasksOfDay(today))
+          .firstWhere((t) => t.id == task.id);
+      expect(updated.done, isTrue, reason: '左滑应该把它标成完成');
+      // 而且不能删掉。
+      expect(await store.tasksOfDay(today), hasLength(1));
+    });
+
+    testWidgets('右滑删除,并且能撤回', (tester) async {
+      store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+
+      // 右滑 = 从左往右拖。
+      await tester.drag(find.text('待办甲'), const Offset(400, 0));
+      await tester.pumpAndSettle();
+
+      expect(await store.tasksOfDay(today), isEmpty);
+      // 删除是破坏性的,要给一次撤回的机会。
+      expect(find.text('撤回'), findsOneWidget);
+
+      await tester.tap(find.text('撤回'));
+      await tester.pumpAndSettle();
+
+      final back = await store.tasksOfDay(today);
+      expect(back, hasLength(1));
+      expect(back.single.text, '待办甲');
+    });
+
+    testWidgets('长按进多选(排序模式下才让位给拖动)', (tester) async {
+      store.seedTask(today, '待办甲');
+      await pumpApp(tester);
+
+      await tester.longPress(find.text('待办甲'));
+      await tester.pumpAndSettle();
+      expect(find.text('已选择 1 项'), findsOneWidget);
+    });
+
+    testWidgets('排序模式里整张卡片按住就能拖', (tester) async {
+      // 进去之后长按不再进多选,而是把这条拖起来。
+      store.seedTask(today, '待办甲');
+      store.seedTask(today, '待办乙');
+      await pumpApp(tester);
+
+      await tester.tap(find.byTooltip('调整顺序'));
+      await tester.pumpAndSettle();
+      expect(find.text('按住任意一条拖动排序'), findsOneWidget);
+
+      // 拖第二条到第一条的位置。
+      //
+      // ReorderableDelayedDragStartListener 要等长按超时才认(约 500ms),
+      // 按下的时间不够就只是一次普通轻触,不会触发拖动。
+      final first = tester.getCenter(find.text('待办甲'));
+      final second = tester.getCenter(find.text('待办乙'));
+      final gesture = await tester.startGesture(second);
+      await tester.pump(const Duration(milliseconds: 700));
+      // 分几步移动:一次跳到位的话拖动识别器看不到中间帧。
+      for (var i = 1; i <= 4; i++) {
+        await gesture.moveTo(second + (first - second) * (i / 4));
+        await tester.pump(const Duration(milliseconds: 60));
+      }
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      final ordered = await store.tasksOfDay(today);
+      expect(
+        ordered.first.text,
+        '待办乙',
+        reason: '拖到前面之后,顺序应该落库;实际顺序 ${ordered.map((t) => t.text).toList()}',
+      );
+    });
+  });
+
   // ---------- 我的页 ----------
 
   group('我的页', () {
@@ -580,6 +663,71 @@ void main() {
       await openTab(tester, '我的');
 
       expect(find.text('还没配 API key'), findsOneWidget);
+    });
+
+    // ---------- 身份卡片:每一项都要能点着改 ----------
+
+    testWidgets('点名字能改称呼', (tester) async {
+      // 用户反馈"没有地方改用户名"——设置页有输入框,但名片上点不进去。
+      await pumpApp(tester);
+      await openTab(tester, '我的');
+
+      // 默认称呼是「我」;先设一个,避免和底部页签上的字撞。
+      await state.saveDisplayName('旧名字');
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('旧名字'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('怎么称呼你'), findsOneWidget);
+      await tester.enterText(find.byType(TextField).last, 'xi283');
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+
+      expect(state.displayName, 'xi283');
+      // 名片上要立刻显示新称呼。
+      expect(find.text('xi283'), findsWidgets);
+    });
+
+    testWidgets('点签名能改签名', (tester) async {
+      await pumpApp(tester);
+      await openTab(tester, '我的');
+
+      await tester.tap(find.text('点这里写一句签名'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('个性签名'), findsOneWidget);
+      await tester.enterText(find.byType(TextField).last, '每天推进一点点');
+      await tester.tap(find.text('保存'));
+      await tester.pumpAndSettle();
+
+      expect(state.bio, '每天推进一点点');
+      expect(find.text('每天推进一点点'), findsOneWidget);
+    });
+
+    testWidgets('名片上有明确的换背景入口', (tester) async {
+      await pumpApp(tester);
+      await openTab(tester, '我的');
+
+      // 以前只有一个不显眼的小图标,用户找不到。
+      expect(find.byTooltip('换背景图'), findsOneWidget);
+      await tester.tap(find.byTooltip('换背景图'));
+      await tester.pumpAndSettle();
+
+      // 弹层里有选图和恢复默认两条路。
+      expect(find.text('从相册选一张'), findsOneWidget);
+    });
+
+    testWidgets('点头像能换头像', (tester) async {
+      await pumpApp(tester);
+      await openTab(tester, '我的');
+
+      // 头像上有个相机角标,说明它是可点的。
+      expect(find.byIcon(Icons.photo_camera), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.photo_camera));
+      await tester.pumpAndSettle();
+
+      expect(find.text('从相册选一张'), findsOneWidget);
     });
 
     testWidgets('能保存 key 和称呼', (tester) async {

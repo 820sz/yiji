@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -27,9 +28,13 @@ void main() {
 
   final today = todayKey();
 
-  Future<void> pumpApp(WidgetTester tester, {bool withKey = true}) async {
+  Future<void> pumpApp(
+    WidgetTester tester, {
+    bool withKey = true,
+    String reply = '好的。',
+  }) async {
     SharedPreferences.setMockInitialValues(withKey ? {'ai_api_key': 'sk-test'} : {});
-    ai = _RecordingAi();
+    ai = _RecordingAi(reply: reply);
     state = AppState(
       store: store,
       reports: ReportService(store),
@@ -52,6 +57,53 @@ void main() {
     await tester.tap(find.byIcon(Icons.arrow_upward));
     await tester.pumpAndSettle();
   }
+
+  group('表情包', () {
+    testWidgets('模型要表情包时,指令不会显示、图会发出来', (tester) async {
+      // 模型在回复末尾写一行 `[表情: 情绪 | 描述]`,那是给系统看的指令,
+      // 不能显示给用户;系统据此挑一张图附在回答后面。
+      await pumpApp(
+        tester,
+        reply: '好耶,那我也替你高兴。\n[表情: 开心 | 蹦起来比心]',
+      );
+      await openTab(tester, '聊天');
+      await send(tester, '今天任务全做完了');
+
+      // 指令行不能被用户看到。
+      expect(find.textContaining('[表情'), findsNothing);
+      expect(find.textContaining('蹦起来比心'), findsNothing);
+      // 正文照常显示。
+      expect(find.textContaining('那我也替你高兴'), findsOneWidget);
+
+      // 落库的消息里要带上挑出来的那张图。
+      final message = state.chat.where((m) => !m.isUser).last;
+      expect(
+        message.content,
+        contains('![图] asset:memes/'),
+        reason: '应该挑一张内置表情包并写进消息,实际内容:${message.content}',
+      );
+    });
+
+    testWidgets('模型没要表情包时不会硬塞一张', (tester) async {
+      await pumpApp(tester, reply: '这周你码了 5k,比上周稳。');
+      await openTab(tester, '聊天');
+      await send(tester, '最近怎么样');
+
+      final message = state.chat.where((m) => !m.isUser).last;
+      expect(message.content.contains('![图]'), isFalse);
+    });
+
+    testWidgets('发图规则只在有图库时才发给模型', (tester) async {
+      // 没有素材却允许它发,它就会写一行永远挑不到图的指令,还白占上下文。
+      // 这个包里有 108 张,所以规则应该在。
+      await pumpApp(tester);
+      await openTab(tester, '聊天');
+      await send(tester, '在吗');
+
+      expect(ai.lastSentText(), contains('表情包'));
+      expect(ai.lastSentText(), contains('[表情:'));
+    });
+  });
 
   group('会话隔离', () {
     testWidgets('新开的对话看不到上一个对话的内容', (tester) async {
@@ -119,6 +171,33 @@ void main() {
 
       // 侧边栏里显示的是这条标题,而不是一堆"新对话"。
       expect(state.conversations.single.title, contains('帮我看看这周的进度'));
+    });
+
+    testWidgets('每个对话有自己的 AI 头像', (tester) async {
+      // 用户要求:头像设置挪到每个聊天里,不同对话可以是不同的人设。
+      await pumpApp(tester);
+      await openTab(tester, '聊天');
+      await send(tester, '第一个对话');
+      final first = state.currentConversationId;
+
+      await state.saveConversationAvatar(Uint8List.fromList([1, 2, 3]));
+      await tester.pumpAndSettle();
+      expect(state.currentConversationAvatar, isNotNull);
+
+      // 开一个新对话:它不该继承上一个的头像。
+      await state.startNewConversation();
+      await tester.pumpAndSettle();
+      await send(tester, '第二个对话');
+      expect(
+        state.currentConversationAvatar,
+        isNull,
+        reason: '新对话不该继承别的对话的头像',
+      );
+
+      // 切回去,原来那个头像还在。
+      await state.openConversation(first);
+      await tester.pumpAndSettle();
+      expect(state.currentConversationAvatar, isNotNull);
     });
 
     testWidgets('删掉会话之后不会再发它的历史', (tester) async {
@@ -344,6 +423,11 @@ void main() {
 /// 别的测试只关心回什么,这一组关心的是**发出去的东西**——
 /// 会话隔离的 bug 正是发错了内容,不记下来就测不到。
 class _RecordingAi extends http.BaseClient {
+  _RecordingAi({this.reply = '好的。'});
+
+  /// 这次要回什么。默认一句"好的。",测表情包时传带指令的内容。
+  final String reply;
+
   List<AiMessage> lastMessagesSent = const [];
 
   /// 这次发出去的全部文本,拼成一段方便断言。
@@ -368,7 +452,7 @@ class _RecordingAi extends http.BaseClient {
     final body = 'data: ${jsonEncode({
           'choices': [
             {
-              'delta': {'content': '好的。'},
+              'delta': {'content': reply},
             }
           ],
         })}\n\ndata: [DONE]\n\n';
