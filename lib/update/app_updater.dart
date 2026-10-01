@@ -52,6 +52,11 @@ class AppUpdater {
   final String owner;
   final String repo;
 
+  /// 连接建好之后,多久没有新数据就判定这次下载已经卡死。
+  ///
+  /// 取值比"连接超时"(30 秒)宽松:大文件在弱网下块与块之间本来就会有间隔。
+  static const _stallTimeout = Duration(seconds: 30);
+
   /// 查最新 release。
   ///
   /// 返回 null 表示"没有比当前更新的版本"(含仓库还没有任何 release 的情况)。
@@ -223,7 +228,14 @@ class AppUpdater {
     }
 
     try {
-      await for (final chunk in response.stream) {
+      // 逐块加超时:连接建好之后对方一直不吐数据(网络假死、被中间设备静默
+      // 丢弃)时不能无限等下去,否则用户看到的是一条永远停在原处的进度条。
+      await for (final chunk in response.stream.timeout(
+        _stallTimeout,
+        onTimeout: (sink) => sink.addError(
+          UpdateException('下载卡住了,对方不再发数据'),
+        ),
+      )) {
         bytes.addAll(chunk);
         if (bytes.length - lastReported < step) continue;
         report(bytes.length);

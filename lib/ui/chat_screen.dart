@@ -229,19 +229,23 @@ class _ChatScreenState extends State<ChatScreen> {
 
     _input.clear();
     final thinking = _overrideThinking;
+    // 先把附件取出来再清空输入区。顺序反过来的话,下面传过去的会是清空后的
+    // 空列表——图选了、发出去了、什么都没带上,而且一个错都不报。
+    final attachments = List.of(_attachments);
+    final range = _attachRange;
     setState(() {
       _sending = true;
       _error = null;
-      // 附件已经交给这次请求了,从输入区清掉。
       _attachments.clear();
+      _attachRange = null;
     });
     _scrollToBottom();
 
     _subscription = state
         .sendChat(
           text,
-          range: _attachRange,
-          attachments: List.of(_attachments),
+          range: range,
+          attachments: attachments,
           thinking: thinking,
         )
         .listen(

@@ -249,10 +249,11 @@ class _DoneMark extends StatelessWidget {
       label: done ? '标记为未完成' : '标记为已完成',
       child: InkResponse(
         onTap: onTap,
-        radius: 22,
+        radius: 26,
         child: Padding(
-          // 圆圈本身只有 22px,撑到 44 才好点。
-          padding: const EdgeInsets.all(6),
+          // 圆圈本身只有 22px,补到 44 才好点(22 + 11×2 = 44)。
+          // 这是全 app 一天点几十次的地方,之前只补到 34,偏一点就点空。
+          padding: const EdgeInsets.all(11),
           child: mark,
         ),
       ),

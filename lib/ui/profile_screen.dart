@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../update/app_updater.dart';
 import 'ai_avatar.dart';
 import 'identity_card.dart';
+import 'prompt_dialog.dart';
 import 'report_screen.dart';
 import 'settings_screen.dart';
 import 'theme.dart';
@@ -259,33 +260,15 @@ class ProfileScreen extends StatelessWidget {
   /// 留空就回到默认文案——开屏上出现空白比出现一句别人的话更怪。
   Future<void> _editSplashText(BuildContext context) async {
     final state = AppScope.of(context);
-    final controller = TextEditingController(text: state.splashText);
     final result = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('开屏文案'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 20,
-          decoration: const InputDecoration(
-            hintText: SettingsStore.defaultSplashText,
-            counterText: '',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('保存'),
-          ),
-        ],
+      builder: (context) => TextPromptDialog(
+        title: '开屏文案',
+        initialValue: state.splashText,
+        hintText: SettingsStore.defaultSplashText,
+        maxLength: 20,
       ),
     );
-    controller.dispose();
     if (result != null) await state.saveSplashText(result);
   }
 

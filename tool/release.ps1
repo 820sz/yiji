@@ -54,12 +54,27 @@ Copy-Item "build/app/outputs/flutter-apk/app-release.apk" $apk -Force
 Get-Item $apk | Select-Object Name, @{n = "MB"; e = { [math]::Round($_.Length / 1MB, 1) } }
 
 Write-Host "=== 5/6 提交推送 ===" -ForegroundColor Cyan
+# 提交信息从文件读:标题里带中文和引号时,PowerShell 的 -m 会被引号吃掉。
+# 文件要用 UTF8(无 BOM)写,否则 BOM 会混进 commit 标题的第一行。
+$msgFile = Join-Path (Get-Location) "tool/commit_msg.txt"
+if (-not (Test-Path $msgFile)) {
+    [System.IO.File]::WriteAllText(
+        $msgFile,
+        "发布 v$Version`n`n$Title`n",
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
 git add -A
-git commit -m "发布 v$Version`n`n$Title"
-git push origin master
+git commit -F $msgFile
+# 网络对 HTTP/2 不通时 push 会一直卡在 "Failed to connect ... port 443",
+# 而 HTTP/1.1 走同一条线路是通的,所以这里固定用它。
+git -c http.version=HTTP/1.1 push origin master
 
 Write-Host "=== 6/6 建 release 并上传 ===" -ForegroundColor Cyan
 $tag = "v$VersionCode"
+# 先把 tag 推上去:没推的话 release 的 asset 会挂在 untagged-<hash> 地址下。
+git tag $tag 2>$null
+git -c http.version=HTTP/1.1 push origin $tag
 # release 先建成草稿再补 asset:直接带上 asset 建,大文件上传一旦超时就只留下空 release。
 gh release create $tag --repo $repo --title $Title --notes-file $NotesFile --draft
 gh release upload $tag $apk --repo $repo --clobber

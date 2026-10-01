@@ -298,6 +298,35 @@ void main() {
 
       expect(chunks, isEmpty);
     });
+
+    test('流中间的数组或裸值不会把整条流打断', () async {
+      // 有些网关会在流里插一条非对象的 data 帧(心跳、指标之类)。
+      // 以前直接 `as Map<String, Object?>` 会抛 TypeError——那是 Error,
+      // 接 FormatException 的 catch 拦不住,整次回答会以一句看不懂的话失败。
+      final body = 'data: [{"heartbeat":true}]\n\n'
+          'data: 42\n\n'
+          'data: ${jsonEncode({
+            'choices': [
+              {
+                'delta': {'content': '正文照常'},
+              }
+            ],
+          })}\n\n'
+          'data: [DONE]\n\n';
+      final fake = _FakeClient(status: 200, body: body);
+      final client = AiClient(httpClient: fake);
+
+      final chunks = await client
+          .streamChat(
+            config: _config,
+            history: [
+              AiMessage.user('hi'),
+            ],
+          )
+          .toList();
+
+      expect(_content(chunks), ['正文照常']);
+    });
   });
 
   group('错误处理', () {

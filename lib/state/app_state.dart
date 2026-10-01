@@ -134,6 +134,9 @@ class AppState extends ChangeNotifier {
   /// 长回答下就是持续抖动。只让那一块正在长的气泡监听这个,其余部分不动。
   final ValueNotifier<int> streamTick = ValueNotifier<int>(0);
 
+  /// 正在生成的这次回答属于哪个会话。落库时用它,而不是当前选中的会话。
+  int _streamingConversationId = 0;
+
   bool get streaming => _streamingAnswer.isNotEmpty || _streamingReasoning.isNotEmpty;
 
   // ---------- 设置 ----------
@@ -352,13 +355,20 @@ class AppState extends ChangeNotifier {
   Future<void> deleteTask(Task task) async {
     await _store.deleteTask(task.id);
     await _loadDay();
+    // 任务没了,它排出去的系统通知也要跟着撤掉。不撤的话手机还会到点弹一条
+    // 指向已删除任务的通知,点进去什么都没有。
+    unawaited(syncReminders());
   }
 
   /// 把某条待办挪到另一天。
+  ///
+  /// 提醒的日期是独立存的,挪日子时必须一起挪——否则提醒还留在原来那天响。
   Future<void> moveTask(Task task, String day) async {
     await _store.updateTaskDay(task.id, day);
+    await _store.moveRemindersOfTask(task.id, day);
     await _loadDay();
     await loadCalendarMonth(_calendarMonth);
+    unawaited(syncReminders());
   }
 
   Future<void> saveJournal(String text) async {
@@ -400,6 +410,7 @@ class AppState extends ChangeNotifier {
     _clearSelection();
     await _loadDay();
     await _refreshPendingSync();
+    unawaited(syncReminders());
   }
 
   /// 按拖拽后的顺序落库。
@@ -451,6 +462,7 @@ class AppState extends ChangeNotifier {
     await _store.deleteTask(task.id);
     await loadCalendarMonth(_calendarMonth);
     if (day == _currentDay) await _loadDay();
+    unawaited(syncReminders());
   }
 
   Future<void> setTaskColorOn(String day, Task task, TaskColor color) async {
@@ -859,6 +871,10 @@ class AppState extends ChangeNotifier {
       conversationId = await _store.createConversation();
       _currentConversationId = conversationId;
     }
+    // 记下这次回答属于哪个会话。生成期间用户可能去侧边栏翻到别的对话,
+    // 落库时必须写回原来那个——否则回答会挂到另一个对话下面,原来那个
+    // 对话则悄悄少了一次回答。
+    _streamingConversationId = conversationId;
 
     // 附件也写进消息文本:回看聊天记录时要知道当时发了什么。
     final shown = [
@@ -957,24 +973,23 @@ class AppState extends ChangeNotifier {
     _streamingAnswer = '';
     _streamingReasoning = '';
     streamTick.value++;
-    if (answer.isEmpty || _currentConversationId == 0) {
+    // 写回**发起时那个**会话,而不是当前选中的那个:生成期间用户可能已经
+    // 翻到别的对话去了。
+    final target = _streamingConversationId;
+    _streamingConversationId = 0;
+    if (answer.isEmpty || target == 0) {
       notifyListeners();
       return;
     }
-    await _store.addMessage(
-      _currentConversationId,
-      'assistant',
-      answer,
-      reasoning: reasoning,
-    );
+    await _store.addMessage(target, 'assistant', answer, reasoning: reasoning);
     // 还没起名的会话用首条用户消息当标题——侧边栏里一堆"新对话"没法分辨。
-    await _autoTitleConversation();
+    await _autoTitleConversation(target);
     await loadConversations();
   }
 
   /// 会话还没标题时,拿首条用户消息命名。
-  Future<void> _autoTitleConversation() async {
-    final id = _currentConversationId;
+  Future<void> _autoTitleConversation([int? conversationId]) async {
+    final id = conversationId ?? _currentConversationId;
     if (id == 0) return;
     final existing = _conversations.where((c) => c.id == id).firstOrNull;
     if (existing != null && existing.title.trim().isNotEmpty) return;

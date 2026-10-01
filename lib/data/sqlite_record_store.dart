@@ -375,6 +375,16 @@ class SqliteRecordStore implements RecordStore {
     await _db.delete('reminders', where: 'task_id = ?', whereArgs: [taskId]);
   }
 
+  @override
+  Future<void> moveRemindersOfTask(int taskId, String day) async {
+    await _db.update(
+      'reminders',
+      {'day': day},
+      where: 'task_id = ?',
+      whereArgs: [taskId],
+    );
+  }
+
   // ---------- 目标与进度推进条 ----------
 
   @override

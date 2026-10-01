@@ -306,7 +306,16 @@ class _TaskRow extends StatelessWidget {
       key: ValueKey('dismiss-${task.id}'),
       direction: selecting ? DismissDirection.none : DismissDirection.endToStart,
       background: const _SwipeBackground(),
-      onDismissed: (_) => state.deleteTaskOn(day, task),
+      // 删除必须在 dismiss 动画**之前**落库并刷新列表。
+      // 放在 onDismissed 里是异步的,会出现"已经通知重建、列表里却还有这条"
+      // 的窗口,Flutter 会直接抛 "A dismissed Dismissible widget is still
+      // part of the tree"(debug 下整屏红)。
+      confirmDismiss: (_) async {
+        await state.deleteTaskOn(day, task);
+        // 这一条已经从数据里删掉了,列表刷新之后它就不该再被渲染,
+        // 所以返回 false 让 Dismissible 自己收回去,而不是走 dismiss 流程。
+        return false;
+      },
       child: TaskCard(
         task: task,
         dark: dark,

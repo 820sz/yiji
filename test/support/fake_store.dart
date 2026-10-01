@@ -433,6 +433,22 @@ class FakeStore implements RecordStore {
   }
 
   @override
+  Future<void> moveRemindersOfTask(int taskId, String day) async {
+    for (var i = 0; i < _reminders.length; i++) {
+      final old = _reminders[i];
+      if (old.taskId != taskId) continue;
+      _reminders[i] = Reminder(
+        id: old.id,
+        taskId: old.taskId,
+        day: day,
+        at: old.at,
+        note: old.note,
+        createdAt: old.createdAt,
+      );
+    }
+  }
+
+  @override
   Future<List<Goal>> goals() async {
     return [for (final goal in _goals) goal.copyWithCurrent(_totalOf(goal.id))];
   }

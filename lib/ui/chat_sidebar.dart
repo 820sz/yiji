@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../data/models.dart';
 import '../state/app_state.dart';
+import 'prompt_dialog.dart';
 import 'theme.dart';
 
 /// 会话侧边栏。
@@ -89,30 +90,14 @@ class ChatSidebar extends StatelessWidget {
 
   Future<void> _rename(BuildContext context, Conversation conversation) async {
     final state = AppScope.of(context);
-    final controller = TextEditingController(text: conversation.title);
     final result = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('对话标题'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 30,
-          decoration: const InputDecoration(counterText: ''),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('保存'),
-          ),
-        ],
+      builder: (context) => TextPromptDialog(
+        title: '对话标题',
+        initialValue: conversation.title,
+        maxLength: 30,
       ),
     );
-    controller.dispose();
     if (result != null) await state.renameConversation(conversation.id, result);
   }
 }

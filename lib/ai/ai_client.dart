@@ -208,13 +208,18 @@ class AiClient {
       final payload = line.substring(5).trim();
       if (payload.isEmpty || payload == '[DONE]') continue;
 
-      final Map<String, Object?> chunk;
+      final Object? decoded;
       try {
-        chunk = jsonDecode(payload) as Map<String, Object?>;
+        decoded = jsonDecode(payload);
       } on FormatException {
         // 半行 JSON 说明服务端分包了,跳过这一片,后续分片会补上。
         continue;
       }
+      // 只认对象。某些网关会在流中间插一条数组或裸值(心跳之类),
+      // 直接 `as Map` 会抛 TypeError——那是 Error 不是 Exception,
+      // 接 FormatException 的 catch 拦不住,整条流会以一句看不懂的话断掉。
+      if (decoded is! Map) continue;
+      final chunk = decoded.cast<String, Object?>();
 
       final delta = _extractDelta(chunk);
       if (delta == null) continue;

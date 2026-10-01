@@ -39,6 +39,12 @@ enum GoalPeriod {
   }
 }
 
+/// 目标上可以被明确清空的字段。
+///
+/// 见 [Goal.copyWith] 的 `clear` 参数:这几个字段都是可空的,
+/// "不改"和"改成空"必须能区分开。
+enum GoalField { target, startDay, endDay }
+
 /// 一个"进度推进条":某个周期内要推进到多少。
 class Goal {
   const Goal({
@@ -131,6 +137,12 @@ class Goal {
     return rounded.toStringAsFixed(1);
   }
 
+  /// 复制并改掉其中几个字段。
+  ///
+  /// [clear] 用来**明确清空**可空字段。没有它就没法把"清空目标值"表达出来:
+  /// `copyWith(target: null)` 与"不动 target"在参数上长得一模一样,于是用户
+  /// 把目标值删掉再保存,进度条上还挂着旧目标——这正是编辑目标时一直有的一个
+  /// 坏行为。要清空就写 `clear: {GoalField.target}`。
   Goal copyWith({
     String? title,
     String? unit,
@@ -141,20 +153,22 @@ class Goal {
     bool? active,
     String? startDay,
     String? endDay,
+    Set<GoalField> clear = const {},
   }) {
     return Goal(
       id: id,
       title: title ?? this.title,
       unit: unit ?? this.unit,
-      target: target ?? this.target,
+      target: clear.contains(GoalField.target) ? null : (target ?? this.target),
       current: current,
       period: period ?? this.period,
       direction: direction ?? this.direction,
       color: color ?? this.color,
       active: active ?? this.active,
       createdAt: createdAt,
-      startDay: startDay ?? this.startDay,
-      endDay: endDay ?? this.endDay,
+      startDay:
+          clear.contains(GoalField.startDay) ? null : (startDay ?? this.startDay),
+      endDay: clear.contains(GoalField.endDay) ? null : (endDay ?? this.endDay),
     );
   }
 

@@ -56,6 +56,11 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
   }
 
   void _reset() {
+    // 切页签/翻区间时把正在生成的那次停掉。
+    // 不停的话,旧区间的流会继续往新区间的成稿区里写字:标题写着"这个月",
+    // 正文却是上周的内容,而且按钮一直卡在"正在写…"。那是真金白银的一次
+    // API 调用被展示到错误的区间上。
+    _cancelGeneration();
     _draft = '';
     _aiError = null;
     // 延到下一帧再取数:切页签会触发本方法,而那时 TabBar 还在构建,
@@ -63,6 +68,12 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) _load();
     });
+  }
+
+  void _cancelGeneration() {
+    _subscription?.cancel();
+    _subscription = null;
+    _generating = false;
   }
 
   Future<void> _load() async {
@@ -111,6 +122,9 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
   Future<void> _generate() async {
     final state = AppScope.of(context);
     await _subscription?.cancel();
+    // 记下这次是为哪个区间生成的。分片回来时如果用户已经翻走了,
+    // 就把它们丢掉,而不是打进别人的成稿区。
+    final generation = '${_isWeek ? 'week' : 'month'}:$_anchor';
     setState(() {
       _draft = '';
       _aiError = null;
@@ -121,25 +135,30 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
         ? state.generateWeekReport(_anchor)
         : state.generateMonthReport(_anchor);
 
+    bool stillCurrent() => mounted && _generationKey == generation;
+
     _subscription = stream.listen(
       (chunk) {
-        if (!mounted) return;
+        if (!stillCurrent()) return;
         setState(() => _draft += chunk);
       },
       onError: (Object error) {
-        if (!mounted) return;
+        if (!stillCurrent()) return;
         setState(() {
           _generating = false;
           _aiError = error is Exception ? error.toString() : '生成失败:$error';
         });
       },
       onDone: () {
-        if (!mounted) return;
+        if (!stillCurrent()) return;
         setState(() => _generating = false);
       },
       cancelOnError: true,
     );
   }
+
+  /// 当前页签 + 区间的标识,用来判断"这一次生成还算不算数"。
+  String get _generationKey => '${_isWeek ? 'week' : 'month'}:$_anchor';
 
   Future<void> _copyDraft() async {
     final text = _exportText();
@@ -330,11 +349,14 @@ class _Stat extends StatelessWidget {
             style: TextStyle(
               fontSize: 22,
               fontWeight: FontWeight.w600,
-              color: highlight ? AppTheme.accent : AppTheme.lightTextPrimary,
+              color: highlight ? AppTheme.accent : AppTheme.textPrimary(context),
             ),
           ),
           const SizedBox(height: 2),
-          Text(label, style: const TextStyle(fontSize: 12, color: AppTheme.lightTextSecondary)),
+          Text(
+            label,
+            style: TextStyle(fontSize: 12, color: AppTheme.textSecondary(context)),
+          ),
         ],
       ),
     );
@@ -353,13 +375,13 @@ class _CompletionList extends StatelessWidget {
     final days = byDay.keys.toList()..sort();
 
     if (days.isEmpty) {
-      return const Card(
+      return Card(
         child: Padding(
-          padding: EdgeInsets.all(20),
+          padding: const EdgeInsets.all(20),
           child: Center(
             child: Text(
               '这个区间还没有任务记录',
-              style: TextStyle(color: AppTheme.lightTextSecondary),
+              style: TextStyle(color: AppTheme.textSecondary(context)),
             ),
           ),
         ),
@@ -404,7 +426,9 @@ class _DayGroup extends StatelessWidget {
                 '$done/${tasks.length}',
                 style: TextStyle(
                   fontSize: 12,
-                  color: done == tasks.length ? AppTheme.accent : AppTheme.lightTextSecondary,
+                  color: done == tasks.length
+                      ? AppTheme.accent
+                      : AppTheme.textSecondary(context),
                 ),
               ),
             ],
@@ -421,7 +445,9 @@ class _DayGroup extends StatelessWidget {
                     child: Icon(
                       task.done ? Icons.check : Icons.close,
                       size: 14,
-                      color: task.done ? AppTheme.accent : AppTheme.lightTextSecondary,
+                      color: task.done
+                          ? AppTheme.accent
+                          : AppTheme.textSecondary(context),
                     ),
                   ),
                   const SizedBox(width: 6),
@@ -435,8 +461,8 @@ class _DayGroup extends StatelessWidget {
                         fontSize: 14,
                         height: 1.4,
                         color: task.done
-                            ? AppTheme.lightTextSecondary
-                            : AppTheme.lightTextPrimary,
+                            ? AppTheme.textSecondary(context)
+                            : AppTheme.textPrimary(context),
                         // 划掉的应该是**已完成**的。
                         // 之前这里判断写反了,导致报告里"没做的"全被划掉,看着像做完了。
                         decoration: task.done ? TextDecoration.lineThrough : null,
@@ -479,7 +505,10 @@ class _JournalSummary extends StatelessWidget {
                 children: [
                   Text(
                     '${shortDateLabel(journal.day)} ${weekdayLabel(journal.day)}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.lightTextSecondary),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary(context),
+                    ),
                   ),
                   const SizedBox(height: 4),
                   Text(
@@ -550,14 +579,22 @@ class _AiSection extends StatelessWidget {
             ),
             const SizedBox(height: 8),
             if (!hasKey)
-              const Text(
+              Text(
                 '还没填 API key,去「我的」里填一个。',
-                style: TextStyle(fontSize: 13, height: 1.5, color: AppTheme.lightTextSecondary),
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.5,
+                  color: AppTheme.textSecondary(context),
+                ),
               )
             else if (draft.isEmpty && !generating)
-              const Text(
+              Text(
                 '按「进度 / 不足 / 调整方向」的格式写成稿。',
-                style: TextStyle(fontSize: 13, height: 1.5, color: AppTheme.lightTextSecondary),
+                style: TextStyle(
+                  fontSize: 13,
+                  height: 1.5,
+                  color: AppTheme.textSecondary(context),
+                ),
               ),
             if (error != null) ...[
               const SizedBox(height: 6),

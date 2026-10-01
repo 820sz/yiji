@@ -1,7 +1,7 @@
 name: yiji
 description: "忆记 — 每日待办、想法、进度推进条、周报月报,加一个自己配 key 的 AI 聊天窗口。"
 publish_to: 'none'
-version: 0.6.0+6
+version: 0.7.0+7
 
 environment:
   sdk: ^3.12.2
@@ -22,8 +22,10 @@ dependencies:
   timezone: 0.11.0
 
 dev_dependencies:
+  # 只给测试用:接口要求实现 PlatformFile.xFile,测试里的假文件要用到它。
+  cross_file: ^0.3.5+5
+  flutter_lints: ^6.0.0
   flutter_test:
     sdk: flutter
-  flutter_lints: ^6.0.0
 flutter:
   uses-material-design: true

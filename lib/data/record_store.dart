@@ -112,6 +112,12 @@ abstract class RecordStore {
   /// 删掉某条任务的所有提醒(任务被删时调用,避免留下孤儿提醒)。
   Future<void> deleteRemindersOfTask(int taskId);
 
+  /// 把某条任务的提醒挪到另一天(任务被改期时调用)。
+  ///
+  /// 提醒的日期是独立存的:不一起挪的话,把带提醒的任务改到下周一,
+  /// 提醒还会在原来那天响。
+  Future<void> moveRemindersOfTask(int taskId, String day);
+
   // ---------- 目标与进度推进条 ----------
 
   /// 全部目标(含归档),每个都带现算的当前值。

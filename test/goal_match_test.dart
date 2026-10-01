@@ -98,6 +98,20 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   group('提示词是概念,不是词表', () {
+    test('聊天提示词不许声称自己记得他的记录', () {
+      // 用户看到过 AI 提起他根本没记过的事。根因就是这句"长期陪伴者,
+      // 读过你所有打卡记录"——模型顺着它编。没有附带数据时必须直说不知道。
+      for (final claim in ['长期陪伴者', '读过你所有', '大学生']) {
+        expect(
+          chatSystemPrompt.contains(claim),
+          isFalse,
+          reason: '提示词里不该有「$claim」这种它做不到的设定',
+        );
+      }
+      expect(chatSystemPrompt, contains('这个对话'));
+      expect(chatSystemPrompt, contains('假装'));
+    });
+
     test('不再列举具体领域的对应关系', () {
       // 块内容用中性占位符:这里如果塞进「健身」「力量训练」,测试就成了
       // 自己给自己喂答案,永远绿的。
@@ -171,6 +185,35 @@ void main() {
   });
 
   group('建目标', () {
+    test('可以把目标值清掉,变回纯推进条', () {
+      // 用户把「目标值」删掉再保存,意思是他不想再定这个数了。
+      // 以前 copyWith 用的是 `target ?? this.target`,清空等于没清:
+      // 进度条上还挂着旧目标,也就永远变不回推进条。
+      final goal = Goal(
+        id: 1,
+        title: '读《义忆》',
+        unit: '页',
+        target: 300,
+        current: 30,
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.blue,
+        active: true,
+        createdAt: DateTime(2026, 9, 29, 8, 0),
+      );
+      final cleared = goal.copyWith(
+        target: null,
+        clear: {GoalField.target},
+      );
+      expect(cleared.target, isNull);
+      expect(cleared.hasTarget, isFalse);
+      // 清空目标值不该顺手把单位也丢了。
+      expect(cleared.unit, '页');
+
+      // 不声明 clear 时仍然是"不改"。
+      expect(goal.copyWith(title: '改个名').target, 300);
+    });
+
     test('没有目标值也能建出来', () {
       // 「我说不清要读多少页」是最常见的情形,不能因此建不了目标。
       final draft = GoalDraft.parse(
@@ -289,6 +332,23 @@ void main() {
 
       expect(state.suggestions, isEmpty);
       expect(ai.lastBody, isNull, reason: '没 key 就不该发请求');
+    });
+
+    test('只是关掉建议面板不会把结果丢掉', () async {
+      // 这份建议是一次付费 API 调用的产物。误触遮罩/下拉关掉面板就把它清空的话,
+      // 用户只能再花钱重跑一遍。
+      store.seedGoal(title: '读《义忆》', unit: '页', current: 0);
+      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final state = await boot(
+        reply: '{"matches":[{"task":1,"goal":1,"amount":30,"unit":"页"}]}',
+      );
+
+      await state.toggleTask(task);
+      await settleAutoSync(state);
+      expect(state.suggestions, hasLength(1));
+
+      // 界面上"关掉面板"对应的是什么都不做——结果应该还在。
+      expect(state.suggestions.single.amount, 30);
     });
 
     test('一条待办只会被算一次', () async {

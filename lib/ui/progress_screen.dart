@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../data/goals.dart';
 import '../data/palette.dart';
 import '../state/app_state.dart';
+import 'prompt_dialog.dart';
 import 'theme.dart';
 
 /// 进度页:进度推进条 + AI 智能同步。
@@ -146,7 +147,9 @@ class ProgressScreen extends StatelessWidget {
       builder: (_) => _SuggestionSheet(suggestions: state.suggestions),
     );
     if (accepted == null) {
-      state.dismissSuggestions();
+      // 只是关掉面板,不要把结果删掉。
+      // 这份建议是一次付费 API 调用的产物,误触遮罩/下拉一下就没了的话,
+      // 只能再花钱重跑一遍。留着,下次点同步时被新结果覆盖即可。
       return;
     }
     final applied = await state.confirmSuggestions(accepted);
@@ -199,6 +202,9 @@ class ProgressScreen extends StatelessWidget {
         period: draft.period,
         direction: draft.direction,
         color: draft.color,
+        // 用户把"目标值"清空时,draft.target 是 null——那意味着他真的想让它
+        // 变回一条纯推进条,而不是"这次不改目标值"。
+        clear: {if (draft.target == null) GoalField.target},
       ),
     );
   }
@@ -855,7 +861,23 @@ class _HistorySheet extends StatefulWidget {
 class _HistorySheetState extends State<_HistorySheet> {
   late List<ProgressEntry> _entries = List.of(widget.entries);
 
-  Goal get goal => widget.goal;
+  /// 表头用的目标。
+  ///
+  /// 不能一直用 `widget.goal`:改完一条推进量之后,进度值已经变了,
+  /// 而传进来的那个 Goal 是打开弹层那一刻的快照——表头会一直写着旧数字。
+  /// 所以每次刷新都从当前状态里按 id 重新取一份。
+  Goal get goal {
+    final current = AppScope.of(context).goals.where((g) => g.id == widget.goal.id);
+    return current.isEmpty ? widget.goal : current.first;
+  }
+
+  /// 重新读一遍明细,顺便让表头跟上。
+  Future<void> _refresh() async {
+    final state = AppScope.of(context);
+    final refreshed = await state.progressHistory(goal);
+    if (!mounted) return;
+    setState(() => _entries = refreshed);
+  }
 
   /// 改一条已经记下的推进。
   ///
@@ -863,54 +885,21 @@ class _HistorySheetState extends State<_HistorySheet> {
   /// 而不是只能删掉重来——手动修正正是"让 AI 自己判断"这个方案成立的前提。
   Future<void> _editEntry(ProgressEntry entry) async {
     final state = AppScope.of(context);
-    final controller = TextEditingController(
-      text: Goal.formatAmount(entry.amount),
+    final value = await showAmountDialog(
+      context,
+      initial: Goal.formatAmount(entry.amount),
+      unit: goal.unit,
     );
-    final value = await showDialog<double>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('改成多少'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          keyboardType: const TextInputType.numberWithOptions(decimal: true),
-          decoration: InputDecoration(
-            suffixText: goal.unit.isEmpty ? null : goal.unit,
-            hintText: '推进量',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(
-              context,
-              double.tryParse(controller.text.trim()),
-            ),
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
-    controller.dispose();
     if (value == null || value <= 0) return;
 
     await state.updateProgressEntry(entry.id, amount: value);
-    if (!mounted) return;
-    final refreshed = await state.progressHistory(goal);
-    if (!mounted) return;
-    setState(() => _entries = refreshed);
+    await _refresh();
   }
 
   Future<void> _deleteEntry(ProgressEntry entry) async {
     final state = AppScope.of(context);
     await state.deleteProgressEntry(entry.id);
-    if (!mounted) return;
-    final refreshed = await state.progressHistory(goal);
-    if (!mounted) return;
-    setState(() => _entries = refreshed);
+    await _refresh();
   }
 
   @override

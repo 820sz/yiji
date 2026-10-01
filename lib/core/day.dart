@@ -26,7 +26,16 @@ DateTime parseDayKey(String key) {
 String todayKey([DateTime? now]) => dayKey(now ?? DateTime.now());
 
 /// 日期加天数,跨月跨年由 `DateTime` 自己处理。
-String addDays(String key, int days) => dayKey(parseDayKey(key).add(Duration(days: days)));
+///
+/// 用日历分量构造 `DateTime(y, m, d + days)`,而不是 `add(Duration(days:))`:
+/// `Duration` 加的是**时间轴上的时长**,在有夏令时的时区里秋令回拨那天
+/// 加 24 小时得到的还是同一个本地日期(那天有 25 小时),于是月份网格会把
+/// 11 月 1 日画两遍、永远画不出 11 月 2 日。按日历分量加就没有这个问题。
+/// 国内没有夏令时,所以这个坑只在换时区/出国时才踩得到,但代价是零。
+String addDays(String key, int days) {
+  final date = parseDayKey(key);
+  return dayKey(DateTime(date.year, date.month, date.day + days));
+}
 
 /// [key] 所在周的周一。周报以周一为一周开始。
 String mondayOf(String key) {
@@ -47,7 +56,8 @@ String firstDayOfMonth(String key) {
 /// [key] 所在月的最后一天(含)。下月 1 号往前退一天,自动处理闰年和月长。
 String lastDayOfMonth(String key) {
   final date = parseDayKey(key);
-  return dayKey(DateTime(date.year, date.month + 1, 1).subtract(const Duration(days: 1)));
+  // 同样按日历分量退一天,理由见 addDays。
+  return dayKey(DateTime(date.year, date.month + 1, 0));
 }
 
 /// 该月的天数。

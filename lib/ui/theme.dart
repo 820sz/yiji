@@ -33,6 +33,22 @@ class AppTheme {
   /// 深色模式下卡片上的字色。
   static const darkCardText = Color(0xFFE4E6EA);
 
+  /// 按当前主题取正文字色。
+  ///
+  /// 有它是因为直接写 `AppTheme.lightTextPrimary` 太容易漏掉深色分支:
+  /// 报告页就漏过一整块,深色模式下那些字是近白色画在浅色卡片上,
+  /// 等于看不见。要用正文字色的地方一律走这里。
+  static Color textPrimary(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+          ? darkTextPrimary
+          : lightTextPrimary;
+
+  /// 按当前主题取次要字色(说明、日期、条数这类)。
+  static Color textSecondary(BuildContext context) =>
+      Theme.of(context).brightness == Brightness.dark
+          ? darkTextSecondary
+          : lightTextSecondary;
+
   // ---------- 动效 ----------
 
   /// 勾选、颜色变化这类即时反馈。

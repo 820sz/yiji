@@ -1,5 +1,8 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:cross_file/cross_file.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -13,6 +16,7 @@ import 'package:yiji/state/app_state.dart';
 import 'package:yiji/ui/ai_avatar.dart';
 import 'package:yiji/ui/calendar_screen.dart';
 import 'package:yiji/ui/task_card.dart';
+import 'package:yiji/ui/theme.dart';
 
 import 'support/fake_store.dart';
 
@@ -37,8 +41,11 @@ void main() {
   final today = todayKey();
   final monday = mondayOf(today);
 
-  Future<void> pumpApp(WidgetTester tester, {bool withKey = false}) async {
-    SharedPreferences.setMockInitialValues(withKey ? {'ai_api_key': 'sk-test'} : {});
+  Future<void> pumpApp(WidgetTester tester, {bool withKey = false, bool withDarkMode = false}) async {
+    SharedPreferences.setMockInitialValues({
+      if (withKey) 'ai_api_key': 'sk-test',
+      if (withDarkMode) 'ui_dark_mode': true,
+    });
     ai = _FakeAi(presetReply: presetReply, presetChunks: presetChunks);
     state = AppState(
       store: store,
@@ -656,6 +663,29 @@ void main() {
         reason: '没完成的事被划掉会让人以为做完了',
       );
     });
+
+    testWidgets('深色模式下总结页的字看得见', (tester) async {
+      // 曾经这里写死了浅色主题的字色(近黑),深色卡片上等于隐身:
+      // 统计数字、逐天任务、AI 说明全都读不出来。
+      // 用一条**未完成**的任务来断言:它走的是正文色那条分支,
+      // 正是当初被写死成 lightTextPrimary 的地方。
+      final task = store.seedTask(monday, '还没做的事');
+
+      await pumpApp(tester, withDarkMode: true);
+      await openTab(tester, '我的');
+      await tester.tap(find.text('周报 / 月报'));
+      await tester.pumpAndSettle();
+
+      final text = tester.widget<Text>(find.byKey(Key('report-task-${task.id}')));
+      final color = text.style!.color!;
+      final surface = AppTheme.darkSurface;
+
+      expect(
+        color.computeLuminance(),
+        greaterThan(surface.computeLuminance() + 0.3),
+        reason: '深色底上的正文要明显更亮,实际字色 $color / 卡片底色 $surface',
+      );
+    });
   });
 
   testWidgets('五个页签都能切到,不报错', (tester) async {
@@ -860,8 +890,63 @@ void main() {
     });
   });
 
-  // ---------- 提醒 ----------
+  // ---------- 发送附件 ----------
 
+  group('带附件发送', () {
+    testWidgets('选好的文件真的会跟着这次请求发出去', (tester) async {
+      // 这一条盯的是一个真实存在过的 bug:输入区在把附件交出去之前就清空了,
+      // 于是选了图、点了发送、什么都没带上,而且一声不吭。
+      final picked = _PickedFile('笔记.md', utf8.encode('今天读了 30 页'));
+      FilePickerPlatform.instance = _StubPicker([picked]);
+      addTearDown(() => FilePickerPlatform.instance = _defaultPicker);
+
+      await pumpApp(tester, withKey: true);
+      await openTab(tester, '聊天');
+
+      // 附件按钮在输入框左边(带图标的那个)。点它 → 选「文件」。
+      await tester.tap(find.byIcon(Icons.add_photo_alternate_outlined));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('文件').last);
+      await tester.pumpAndSettle();
+
+      // 附件先出现在输入区的待发列表里。
+      expect(find.text('笔记.md'), findsOneWidget);
+
+      await tester.enterText(find.widgetWithText(TextField, '说点什么'), '看看这个');
+      await tester.tap(find.byIcon(Icons.arrow_upward));
+      await tester.pumpAndSettle();
+
+      expect(
+        ai.lastSentText(),
+        contains('今天读了 30 页'),
+        reason: '文件内容必须出现在发给模型的请求里',
+      );
+      expect(ai.lastSentText(), contains('看看这个'));
+    });
+
+    testWidgets('只发附件、不写字也能发出去', (tester) async {
+      final picked = _PickedFile('笔记.md', utf8.encode('只有文件'));
+      FilePickerPlatform.instance = _StubPicker([picked]);
+      addTearDown(() => FilePickerPlatform.instance = _defaultPicker);
+
+      await pumpApp(tester, withKey: true);
+      await openTab(tester, '聊天');
+
+      await tester.tap(find.byIcon(Icons.add_photo_alternate_outlined));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('文件').last);
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byIcon(Icons.arrow_upward));
+      await tester.pumpAndSettle();
+
+      // 以前这种情况会被"空消息"的判断拦掉:输入框清了,什么都没发生。
+      expect(ai.lastBody, isNotNull, reason: '只有附件也该真的发一次请求');
+      expect(ai.lastSentText(), contains('只有文件'));
+    });
+  });
+
+  // ---------- 提醒 ----------
   group('日历里设提醒', () {
     testWidgets('点日期进的那一页可以直接设提醒,不用先建任务', (tester) async {
       // 这一页是点日历上的日期进来的。提醒的入口必须在这一层:
@@ -953,6 +1038,65 @@ void main() {
   });
 }
 
+/// 一个假的"选好的文件"。
+///
+/// 直接用内存字节,不走磁盘:这一组要验的是"选完之后有没有真的发给模型",
+/// 不是插件的取文件逻辑。
+base class _PickedFile extends PlatformFile {
+  _PickedFile(this.name, this.bytes);
+
+  @override
+  final String name;
+
+  final List<int> bytes;
+
+  @override
+  Uri get uri => Uri.file(name);
+
+  @override
+  XFile get xFile => XFile(name);
+
+  @override
+  int? lengthSync() => bytes.length;
+
+  @override
+  Future<int?> length() async => bytes.length;
+
+  @override
+  Future<Uint8List> readAsBytes() async => Uint8List.fromList(bytes);
+
+  @override
+  Stream<Uint8List> readAsByteStream() =>
+      Stream.value(Uint8List.fromList(bytes));
+}
+
+/// 替换掉系统文件选择器:点"文件"之后直接返回预设的文件。
+class _StubPicker extends FilePickerPlatform {
+  _StubPicker(this.files);
+
+  final List<PlatformFile> files;
+
+  @override
+  Future<List<PlatformFile>> pickFiles({
+    String? dialogTitle,
+    String? initialDirectory,
+    FileType type = FileType.any,
+    List<String>? allowedExtensions,
+    Function(FilePickerStatus)? onFileLoading,
+    int compressionQuality = 0,
+    AndroidOptions androidOptions = const AndroidOptions(),
+    DarwinOptions darwinOptions = const DarwinOptions(),
+    WindowsOptions windowsOptions = const WindowsOptions(),
+    LinuxOptions linuxOptions = const LinuxOptions(),
+    WebOptions webOptions = const WebOptions(),
+  }) async {
+    return files;
+  }
+}
+
+/// 真机上本来装着的那个实例,测试结束后要还回去。
+final _defaultPicker = FilePickerPlatform.instance;
+
 /// 一个按脚本回答的假 HTTP 客户端。
 ///
 /// 测的是"拿到这些流式分片之后界面怎么表现",所以不联网、也不依赖真实模型。
@@ -965,8 +1109,33 @@ class _FakeAi extends http.BaseClient {
   /// 指定时按这些分片依次流式返回。
   final List<AiChunk>? presetChunks;
 
+  /// 最近一次请求体。用来断言"发出去的东西里到底有没有附件"。
+  Map<String, Object?>? lastBody;
+
+  /// 最近一次请求的全部文本内容拼在一起,方便直接找子串。
+  String lastSentText() {
+    final messages = lastBody?['messages'];
+    if (messages is! List) return '';
+    final buffer = StringBuffer();
+    for (final item in messages) {
+      if (item is! Map) continue;
+      final content = item['content'];
+      if (content is String) {
+        buffer.writeln(content);
+      } else if (content is List) {
+        for (final part in content) {
+          if (part is Map && part['text'] is String) buffer.writeln(part['text']);
+        }
+      }
+    }
+    return buffer.toString();
+  }
+
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    if (request is http.Request) {
+      lastBody = jsonDecode(utf8.decode(request.bodyBytes)) as Map<String, Object?>;
+    }
     final payloads = presetChunks ?? [AiChunk.content(presetReply ?? '好的。')];
     final body = payloads
         .map(

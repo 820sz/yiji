@@ -481,9 +481,14 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
                                     color: Color(0xFFE05252),
                                   ),
                                 ),
-                                onDismissed: (_) async {
+                                // 删除要发生在 dismiss 动画之前:放在
+                                // onDismissed 里的话,异步落库期间这一条还在
+                                // 列表里,重建就会抛 "A dismissed Dismissible
+                                // widget is still part of the tree"。
+                                confirmDismiss: (_) async {
                                   await state.deleteTaskOn(widget.day, task);
                                   await _reload();
+                                  return false;
                                 },
                                 child: TaskCard(
                                   task: task,
@@ -557,16 +562,14 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
 /// 想法/收获的编辑器。想法通常比待办长,给足空间。
 Future<void> showJournalEditor(BuildContext context, String day, String initial) async {
   final state = AppScope.of(context);
-  final controller = TextEditingController(text: initial);
   final result = await Navigator.of(context).push<String>(
     MaterialPageRoute(
       builder: (context) => _JournalEditorPage(
         title: '${shortDateLabel(day)}的想法',
-        controller: controller,
+        initial: initial,
       ),
     ),
   );
-  controller.dispose();
   if (result != null) {
     // 编辑器只对"当前查看的那天"生效;从日历进来时先切过去,避免写错天。
     if (day != state.currentDay) await state.goToDay(day);
@@ -574,20 +577,35 @@ Future<void> showJournalEditor(BuildContext context, String day, String initial)
   }
 }
 
-class _JournalEditorPage extends StatelessWidget {
-  const _JournalEditorPage({required this.title, required this.controller});
+class _JournalEditorPage extends StatefulWidget {
+  const _JournalEditorPage({required this.title, required this.initial});
 
   final String title;
-  final TextEditingController controller;
+  final String initial;
+
+  @override
+  State<_JournalEditorPage> createState() => _JournalEditorPageState();
+}
+
+class _JournalEditorPageState extends State<_JournalEditorPage> {
+  // controller 由页面自己持有并释放。以前是外面建好传进来、await 之后 dispose,
+  // 而那个 future 在 pop 的瞬间就完成了——页面还在跑退场动画、还在读它。
+  late final _controller = TextEditingController(text: widget.initial);
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: Text(title),
+        title: Text(widget.title),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
+            onPressed: () => Navigator.pop(context, _controller.text),
             child: const Text('保存'),
           ),
         ],
@@ -595,7 +613,7 @@ class _JournalEditorPage extends StatelessWidget {
       body: Padding(
         padding: const EdgeInsets.all(16),
         child: TextField(
-          controller: controller,
+          controller: _controller,
           autofocus: true,
           maxLines: null,
           expands: true,

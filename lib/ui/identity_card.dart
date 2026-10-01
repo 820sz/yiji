@@ -5,6 +5,7 @@ import 'package:image_picker/image_picker.dart';
 
 import '../state/app_state.dart';
 import 'chat_sidebar.dart';
+import 'prompt_dialog.dart';
 import 'theme.dart';
 
 /// 用户身份卡片。
@@ -152,35 +153,16 @@ class IdentityCard extends StatelessWidget {
 
   Future<void> _editSignature(BuildContext context) async {
     final state = AppScope.of(context);
-    final controller = TextEditingController(text: state.bio);
     final result = await showDialog<String>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('个性签名'),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLength: 40,
-          maxLines: 2,
-          minLines: 1,
-          decoration: const InputDecoration(
-            hintText: '想对自己说点什么',
-            counterText: '',
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('取消'),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pop(context, controller.text),
-            child: const Text('保存'),
-          ),
-        ],
+      builder: (context) => TextPromptDialog(
+        title: '个性签名',
+        initialValue: state.bio,
+        hintText: '想对自己说点什么',
+        maxLength: 40,
+        maxLines: 2,
       ),
     );
-    controller.dispose();
     if (result != null) await state.saveBio(result);
   }
 }
