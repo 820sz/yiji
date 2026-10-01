@@ -1,9 +1,67 @@
-# 本轮任务看板(v0.8.0)
+# 本轮任务看板(v0.8.0)—— 全部完成
 
-用户一次性提了 8 项。这份文件是**唯一进度源**,每完成一项就改状态并写上证据。
-共享任务板上对应 task-1 … task-8。
+用户一次性提了 8 项。这份文件是**唯一进度源**。
+共享任务板上对应 task-1 … task-8,**八项全部 completed**。
 
 约定:每项必须有**命令证据**(测试输出、analyze 结果、APK 校验),不写"应该可以"。
+
+---
+
+## 状态总览(全部完成)
+
+| # | 任务 | 共享任务 | 状态 | 证据 |
+|---|---|---|---|---|
+| 1 | 任务左滑=完成、右滑=删除(带撤回) | task-1 | ✅ | `任务卡片的手势` 4 条用例:左滑→done、右滑→删除+撤回、长按多选 |
+| 2 | 长按拖拽排序 | task-2 | ✅ | 同组第 4 条:排序模式按住 700ms 分段拖动 → 顺序落库 |
+| 3 | 任务可标"没做好",AI 读到 | task-4 | ✅ | sqltest 67 全绿(含 v3→v4 迁移,红/绿验证);报告单列 △ |
+| 4 | 替换混乱的系统时间选择器 | task-3 | ✅ | 自建滚轮 + zh_CN 本地化;两处调用已换 |
+| 5 | AI 主动建议补充新目标(多选) | task-5 | ✅ | `AI 建议补充新目标` 5 条用例全绿 |
+| 6 | 聊天:丝滑 + 图片 + 表情包 + 每会话头像 | task-6 | ✅ | `chat_image_test` 15 条 + 会话测试 3 条(表情包/头像/不硬塞) |
+| 7 | 我的页身份卡片可编辑 + 打磨 | task-7 | ✅ | `我的页` 新增 4 条:改名、改签名、换背景、换头像 |
+| 8 | 表情包素材接进 APK | task-8 | ✅ | APK 内 108 张 webp + index.json,共 3.58 MB(字节级校验) |
+
+**最终验证**
+- `flutter analyze`:**No issues found**
+- 顶层测试:**189 条全绿**(`flutter test`)
+- 数据层测试:**67 条全绿**(`tool/sqltest` 里的 `flutter test`)
+- 发布:release tag `v8`,资产 64,061,203 字节,`HEAD` 200;桌面 APK 与它**字节一致**
+- APK 内容校验:9 条新文案在 `libapp.so` 里;`assets/flutter_assets/assets/memes/` 下 109 个条目
+
+---
+
+## 这一轮踩到的坑(下次别再踩)
+
+1. **Flutter 资源声明不支持通配符。** 写 `assets/memes/**` 会让 `flutter test`
+   直接崩(`Illegal character in path: **`);只写 `assets/memes/` 又**不含子目录**。
+   必须逐个 tag 目录列出来。
+2. **不要用 PowerShell 的 `-replace` / `Set-Content` 改 Dart 源码**:会把 UTF-8
+   中文写成乱码。这一轮因此毁过两次文件(已从 git 恢复)。要么用编辑工具,
+   要么用 .NET 的 `File.WriteAllText(path, text, UTF8Encoding($false))`。
+3. **schema 迁移要一步一个版本。** v2→v4 的链路上,`createConversationTableV3`
+   必须建 **v3 当时的样子**(不含后来加的列),否则 v4 的 `ALTER` 会撞
+   `duplicate column name`。用 `v2 升级到 v3` 那条测试做红/绿验证。
+4. **拖动识别器要等长按超时。** 测试里按住 700ms 再分段移动才认;
+   按太短就只是一次普通轻触。
+5. **测试替身漏字段会伪装成产品 bug。** `FakeStore.conversations()` 重建对象时
+   漏了 `avatar`,于是"每个对话独立头像"看起来永远是坏的,而生产实现没问题。
+   改测试替身时要比着模型逐字段核对。
+
+---
+
+## 需求原文 → 实现位置(便于回溯)
+
+| 用户原话 | 位置 |
+|---|---|
+| 任务左滑应该是"完成" | `lib/ui/today_screen.dart` 的 `_TaskRow.confirmDismiss` |
+| 支持长按拖住进行排序 | 同文件 `_DragToReorder` + 表头「调整顺序」按钮 |
+| 增加"未完成"标记,AI 读取 | `TaskOutcome`(models.dart)、编辑页「完成情况」、`report_service.dart` |
+| 日历的闹钟提示的时钟界面混乱 | `lib/ui/time_sheet.dart` |
+| AI 识别后智能补充任务 | `goal_matcher.dart` 的 `newGoals` + `progress_screen.dart` 的审阅面板 |
+| 上传的图片要显示图片 | `chat_screen.dart` 的 `splitMessageParts` 与 `_MessageImage` |
+| 增加表情包插件 | `assets/memes/` + `meme_directive.dart` + `meme_sheet.dart` |
+| 对话侧边栏"头像+标题"、每聊天头像 | `chat_sidebar.dart`、`conversations.avatar` |
+| 用户名片没法编辑 | `lib/ui/identity_card.dart`(四个独立编辑入口) |
+
 
 ---
 
