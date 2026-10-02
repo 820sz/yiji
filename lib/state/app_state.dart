@@ -1102,6 +1102,19 @@ class AppState extends ChangeNotifier {
     notifyListeners();
 
     final config = thinking == null ? aiConfig : aiConfig.copyWith(thinking: thinking);
+
+    // 第一个分片到达时**必须** notifyListeners 一次。
+    //
+    // 只看 streamTick 是不够的:列表里那个"正在生成"的槽位由 `streaming`
+    // 这个开关决定插不插入,而页面级重建只有 notifyListeners 才会触发。
+    // 少了这一次通知,槽位永远不插入,正文就一个字都不显示——直到最后
+    // commitAssistantMessage 落库才整段冒出来。用户看到的正是
+    // "闪烁没了,但流式输出也没了";旧版本之所以看着有流式,是因为每个分片
+    // 都在 setState 整页(那才是抖动的来源)。
+    //
+    // 只通知这一次,后续分片仍然只走 streamTick:槽位已经在树上了,
+    // 让它自己重绘即可,不必每次重排整页。
+    var announced = streaming;
     await for (final chunk in _ai.streamChat(config: config, history: history)) {
       if (chunk.isReasoning) {
         _streamingReasoning += chunk.text;
@@ -1110,6 +1123,10 @@ class AppState extends ChangeNotifier {
         // 不能显示给用户,而流是一段段来的、标记可能被切在两个字中间,
         // 所以交给 [visibleStreamingAnswer] 在渲染时裁掉,不在这里判断。
         _streamingAnswer += chunk.text;
+      }
+      if (!announced) {
+        announced = true;
+        notifyListeners();
       }
       // 只惊动正在长的那个气泡。整页 notifyListeners 会让每一帧都重排
       // 全部消息,看上去就是抖。
