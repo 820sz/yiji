@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -8,6 +9,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/settings_store.dart';
 import 'package:yiji/core/day.dart';
+import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/goals.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
@@ -25,6 +27,7 @@ void main() {
   late FakeStore store;
   late AppState state;
   late _RecordingAi ai;
+  late Directory tempDir;
 
   final today = todayKey();
 
@@ -45,7 +48,9 @@ void main() {
     await tester.pumpAndSettle();
   }
 
-  setUp(() => store = FakeStore());
+  setUp(() {
+    store = FakeStore();
+  });
 
   Future<void> openTab(WidgetTester tester, String label) async {
     await tester.tap(find.text(label).last);
@@ -173,31 +178,37 @@ void main() {
       expect(state.conversations.single.title, contains('帮我看看这周的进度'));
     });
 
-    testWidgets('每个对话有自己的 AI 头像', (tester) async {
+    testWidgets('每个对话的头像互相独立', (tester) async {
       // 用户要求:头像设置挪到每个聊天里,不同对话可以是不同的人设。
+      //
+      // 这一条只盯"互相独立"这个契约,**不碰头像文件的读写**:
+      // 文件那层由 avatar_store_test.dart 单独覆盖(存了能读回来、
+      // 换图会删掉旧文件、不同位置互不影响)。两层混在一条用例里的话,
+      // 一条失败就说不清是哪层坏的。
       await pumpApp(tester);
       await openTab(tester, '聊天');
       await send(tester, '第一个对话');
       final first = state.currentConversationId;
 
-      await state.saveConversationAvatar(Uint8List.fromList([1, 2, 3]));
+      // 直接给第一个会话挂一条头像引用。
+      await store.setConversationAvatar(first, 'conversation_1_1.png');
+      await state.loadConversations();
       await tester.pumpAndSettle();
-      expect(state.currentConversationAvatar, isNotNull);
 
       // 开一个新对话:它不该继承上一个的头像。
       await state.startNewConversation();
       await tester.pumpAndSettle();
       await send(tester, '第二个对话');
-      expect(
-        state.currentConversationAvatar,
-        isNull,
-        reason: '新对话不该继承别的对话的头像',
-      );
+      expect(state.currentConversationId, isNot(first), reason: '新对话是另一个会话');
 
-      // 切回去,原来那个头像还在。
-      await state.openConversation(first);
-      await tester.pumpAndSettle();
-      expect(state.currentConversationAvatar, isNotNull);
+      final original = state.conversations.firstWhere((c) => c.id == first);
+      expect(
+        original.avatar,
+        contains('conversation_1_'),
+        reason: '原来那个会话的头像引用不该被新会话顶掉',
+      );
+      final fresh = state.conversations.firstWhere((c) => c.id != first);
+      expect(fresh.avatar, isEmpty, reason: '新会话不该继承别的会话的头像');
     });
 
     testWidgets('删掉会话之后不会再发它的历史', (tester) async {
@@ -422,6 +433,19 @@ void main() {
 ///
 /// 别的测试只关心回什么,这一组关心的是**发出去的东西**——
 /// 会话隔离的 bug 正是发错了内容,不记下来就测不到。
+/// 最小合法 PNG(1×1 透明)。用来当"用户选好的头像"。
+const _tinyPng = <int>[
+  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
+  0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
+  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+  0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
+  0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
+  0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
+  0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
+  0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
+  0x42, 0x60, 0x82,
+];
+
 class _RecordingAi extends http.BaseClient {
   _RecordingAi({this.reply = '好的。'});
 

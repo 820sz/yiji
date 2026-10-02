@@ -252,7 +252,19 @@ class _ChatScreenState extends State<ChatScreen> {
         withShape: true,
       );
       if (cropped == null) return;
-      await state.saveConversationAvatar(cropped.bytes);
+      try {
+        await state.saveConversationAvatar(cropped.bytes);
+      } on AvatarSaveException catch (error) {
+        // 保存失败必须报出来:调整页正常退出、头像却没变,
+        // 用户只会觉得"这个功能是坏的"(之前就是静默失败)。
+        if (!mounted) return;
+        ScaffoldMessenger.of(context)
+            .showSnackBar(SnackBar(content: Text(error.message)));
+        return;
+      }
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(const SnackBar(content: Text('头像已更新')));
     } on Exception catch (error) {
       if (!mounted) return;
       ScaffoldMessenger.of(context)

@@ -32,12 +32,14 @@ class CroppedImage {
 ///
 /// [aspect] 是裁剪框的宽高比(头像用 1,背景用 16/9)。
 /// [withShape] 打开形状选择(只有头像需要)。
+/// [outputSize] 输出边长。默认 512 够头像用;名片背景那类要更大的传 1080。
 Future<CroppedImage?> showImageCropper(
   BuildContext context, {
   required Uint8List bytes,
   double aspect = 1,
   bool withShape = false,
   AvatarShape initialShape = AvatarShape.circle,
+  int outputSize = 512,
 }) {
   return Navigator.of(context).push<CroppedImage>(
     MaterialPageRoute(
@@ -47,6 +49,7 @@ Future<CroppedImage?> showImageCropper(
         aspect: aspect,
         withShape: withShape,
         initialShape: initialShape,
+        outputSize: outputSize,
       ),
     ),
   );
@@ -58,12 +61,14 @@ class _CropperPage extends StatefulWidget {
     required this.aspect,
     required this.withShape,
     required this.initialShape,
+    required this.outputSize,
   });
 
   final Uint8List bytes;
   final double aspect;
   final bool withShape;
   final AvatarShape initialShape;
+  final int outputSize;
 
   @override
   State<_CropperPage> createState() => _CropperPageState();
@@ -268,8 +273,7 @@ class _CropperPageState extends State<_CropperPage> {
   }
 
   Future<Uint8List> _render() async {
-    // 输出边长:头像显示尺寸不大,512 足够清晰,也省内存。
-    const output = 512.0;
+    final output = widget.outputSize.toDouble();
     final recorder = ui.PictureRecorder();
     final canvas = Canvas(recorder, Rect.fromLTWH(0, 0, output, output));
 

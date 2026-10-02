@@ -8,6 +8,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/scheduler.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../ai/ai_client.dart';
@@ -896,17 +897,17 @@ class AppState extends ChangeNotifier {
     return '';
   }
 
-  /// 当前会话的 AI 头像(base64 data URL,空串表示用默认的模型标志)。
+  /// 当前会话的 AI 头像。空表示用默认的模型标志。
   ///
   /// 头像是**每个会话各自**的:不同对话可以是不同的人设。
   Uint8List? get currentConversationAvatar =>
-      _decodeAvatar(currentConversation?.avatar ?? '');
+      _avatarFor(currentConversation?.avatar ?? '');
 
   /// 某个会话的头像;它自己没设过就回落到全局那个。
   ///
   /// 侧边栏要在每条对话上显示头像,所以这里按会话取,而不是只看当前那个。
   Uint8List? avatarOf(Conversation conversation) =>
-      _decodeAvatar(conversation.avatar) ?? _settings.avatarBytes;
+      _avatarFor(conversation.avatar) ?? _settings.avatarBytes;
 
   Conversation? get currentConversation {
     for (final conversation in _conversations) {
@@ -915,27 +916,75 @@ class AppState extends ChangeNotifier {
     return null;
   }
 
-  static Uint8List? _decodeAvatar(String base64Text) {
-    if (base64Text.trim().isEmpty) return null;
-    try {
-      // 存的时候带上 data URL 前缀,这里剥掉再解。
-      final payload = base64Text.contains(',')
-          ? base64Text.split(',').last
-          : base64Text;
-      return base64Decode(payload);
-    } on FormatException {
-      return null;
+  /// 头像字节缓存,键是存进库的那个引用。
+  ///
+  /// 头像是**文件**而不是库里的 base64(见 [ChatImages.saveAvatar]):
+  /// 512×512 的 PNG 编码成 base64 有几百 KB,塞进一行里写起来又慢又容易失败,
+  /// 用户报的"调完大小形状就保存不上"就是这么来的。文件名进库,内容进磁盘。
+  ///
+  /// 缓存是为了让界面能同步取到图:读文件是异步的,而 `build` 不能等。
+  final Map<String, Uint8List> _avatarCache = {};
+  final Set<String> _avatarLoading = {};
+
+  /// 取头像字节。缓存里没有就返回 null 并**安排**一次异步加载。
+  ///
+  /// 这个方法是可能在 `build` 期间被调用的(界面渲染时会读它),
+  /// 所以加载完成后**不能直接 notifyListeners()**——在 build 里发通知会让
+  /// 同一帧再次标脏,重建、又发通知,`pumpAndSettle` 永远等不到静止
+  /// (表现为测试挂死几十分钟)。改成排到帧后再通知。
+  Uint8List? _avatarFor(String ref) {
+    final trimmed = ref.trim();
+    if (trimmed.isEmpty) return null;
+    final cached = _avatarCache[trimmed];
+    if (cached != null) return cached;
+    if (_avatarLoading.add(trimmed)) {
+      unawaited(
+        ChatImages.readAvatar(trimmed).then(
+          (bytes) {
+            _avatarLoading.remove(trimmed);
+            if (bytes == null) return;
+            _avatarCache[trimmed] = bytes;
+            _notifyAfterBuild();
+          },
+          // 读不到就算了(文件被清理、平台通道不可用等)。必须在这里兜住:
+          // 未处理的异步异常会让整页测试挂死,而不是给一个有意义的失败。
+          onError: (Object _) => _avatarLoading.remove(trimmed),
+        ),
+      );
     }
+    return null;
   }
+
+  /// 把通知排到当前帧之后。正在 build 时直接通知会造成重建循环。
+  void _notifyAfterBuild() {
+    final binding = WidgetsBinding.instance;
+    if (binding.schedulerPhase == SchedulerPhase.persistentCallbacks) {
+      binding.addPostFrameCallback((_) {
+        if (!_disposed) notifyListeners();
+      });
+      return;
+    }
+    notifyListeners();
+  }
+  bool _disposed = false;
 
   /// 给当前会话换一张 AI 头像。传 null 恢复默认。
   Future<void> saveConversationAvatar(Uint8List? bytes) async {
     final id = _currentConversationId;
     if (id == 0) return;
-    final encoded = bytes == null
-        ? ''
-        : 'data:image/png;base64,${base64Encode(bytes)}';
-    await _store.setConversationAvatar(id, encoded);
+    if (bytes == null) {
+      await _store.setConversationAvatar(id, '');
+      await loadConversations();
+      return;
+    }
+    final name = await ChatImages.saveAvatar('conversation_$id', bytes);
+    if (name == null) {
+      // 写文件失败就**报出来**。以前这里出错是静默的:用户点完确认、
+      // 调整页也正常退出,头像却没变——"改不了"就是这么来的。
+      throw const AvatarSaveException('头像没保存上,可能是存储空间不够,再试一次');
+    }
+    _avatarCache[name] = bytes;
+    await _store.setConversationAvatar(id, name);
     await loadConversations();
   }
 
@@ -1316,9 +1365,24 @@ class AppState extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _ai.dispose();
     super.dispose();
   }
+}
+
+/// 头像没能保存。
+///
+/// 单独一个类型是为了让界面能区分"用户取消"和"真的没存上"——
+/// 后者必须报出来。以前失败是静默的:调整页正常退出、什么都没变,
+/// 用户只会觉得"这个功能坏了"。
+class AvatarSaveException implements Exception {
+  const AvatarSaveException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
 }
 
 /// 从 [AppDatabase] 一行装好所有依赖,供 `main` 使用。

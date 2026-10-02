@@ -203,11 +203,28 @@ class MemeLibrary {
 class ChatImages {
   static Directory? _dir;
 
+  /// 测试用的目录覆盖。同时作为图片目录和头像目录的根。
+  ///
+  /// 测试环境没有 path_provider 的平台通道,`getApplicationSupportDirectory()`
+  /// 会抛 MissingPluginException;给测试一个明确的注入口,比到处兜 Error 干净。
+  static set directoryOverride(Directory? value) {
+    _dir = value;
+    _override = value;
+    _avatarDir = null;
+  }
+
+  static Directory? _override;
+  static Directory? _avatarDir;
+
+  /// 取根目录:优先测试覆盖,否则问系统。
+  static Future<Directory> _base() async =>
+      _override ?? await getApplicationSupportDirectory();
+
   /// 图片目录(不存在则建)。
   static Future<Directory> dir() async {
     final cached = _dir;
     if (cached != null) return cached;
-    final base = await getApplicationSupportDirectory();
+    final base = await _base();
     final target = Directory(p.join(base.path, 'chat_images'));
     if (!await target.exists()) await target.create(recursive: true);
     return _dir = target;
@@ -233,6 +250,70 @@ class ChatImages {
       final directory = await dir();
       final file = File(p.join(directory.path, name));
       return await file.exists() ? file : null;
+    } on Exception {
+      return null;
+    }
+  }
+
+  /// 头像目录。和聊天图片分开放,便于整目录清理。
+  static Future<Directory> avatarDir() async {
+    final cached = _avatarDir;
+    if (cached != null) return cached;
+    final base = await _base();
+    final target = Directory(p.join(base.path, 'avatars'));
+    if (!await target.exists()) await target.create(recursive: true);
+    return _avatarDir = target;
+  }
+
+  /// 保存一张头像,返回**文件名**(不是完整路径)。
+  ///
+  /// 头像以前是 base64 直接写进数据库的一行。512×512 的 PNG 编码出来
+  /// 几百 KB,base64 之后还要再涨三分之一,写起来又慢又容易失败——
+  /// 用户报的"调完大小形状就保存不上"就是这个。改成写文件之后,
+  /// 库里只留一个短文件名,读写都变成常量级的。
+  ///
+  /// [key] 用来区分不同的头像位(比如 `conversation_3`、`user`)。
+  static Future<String?> saveAvatar(String key, Uint8List bytes) async {
+    try {
+      final directory = await avatarDir();
+      // 同一 key 换图时旧文件要删掉,否则换十次头像就是十份垃圾。
+      // 先写新文件再删旧的:万一写到一半失败,旧头像还在。
+      final name = '${key}_${DateTime.now().microsecondsSinceEpoch}.png';
+      final target = File(p.join(directory.path, name));
+      await target.writeAsBytes(bytes, flush: true);
+      await _removeOtherAvatars(directory, key, keep: name);
+      return name;
+    } on Exception {
+      return null;
+    }
+  }
+
+  /// 删掉同一个 key 下的旧头像文件。
+  static Future<void> _removeOtherAvatars(
+    Directory directory,
+    String key, {
+    required String keep,
+  }) async {
+    final prefix = '${key}_';
+    await for (final entity in directory.list()) {
+      if (entity is! File) continue;
+      final name = p.basename(entity.path);
+      if (!name.startsWith(prefix) || name == keep) continue;
+      try {
+        await entity.delete();
+      } on Exception {
+        // 删不掉就留着:多占一点空间而已,不该让换头像失败。
+      }
+    }
+  }
+
+  /// 读一张头像文件。不存在返回 null。
+  static Future<Uint8List?> readAvatar(String name) async {
+    try {
+      final directory = await avatarDir();
+      final file = File(p.join(directory.path, name));
+      if (!await file.exists()) return null;
+      return await file.readAsBytes();
     } on Exception {
       return null;
     }
