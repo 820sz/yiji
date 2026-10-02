@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../ai/ai_client.dart';
+import '../ai/search_service.dart';
 import '../core/day.dart';
 import '../data/chat_attachment.dart';
 import '../data/chat_images.dart';
@@ -569,12 +570,38 @@ class _ChatScreenState extends State<ChatScreen> {
                 ],
               ),
             ),
+          // 联网搜索开着时,把来源摆出来。
+          //
+          // 用户得知道"这次回答是联网来的"以及"依据是哪几条",
+          // 否则搜没搜、搜到什么完全看不见,跟不联网没区别。
+          if (state.searching)
+            _SearchStatusBar(
+              icon: Icons.travel_explore,
+              text: '正在联网搜索…',
+              dark: dark,
+              spinning: true,
+            )
+          else if (state.lastSearch != null && !state.lastSearch!.isEmpty)
+            _SearchStatusBar(
+              icon: Icons.public,
+              text: '已联网 · ${state.lastSearch!.sources.length} 条来源',
+              dark: dark,
+              sources: state.lastSearch!.sources,
+            )
+          else if (state.searchFailed != null)
+            _SearchStatusBar(
+              icon: Icons.cloud_off,
+              text: state.searchFailed!,
+              dark: dark,
+            ),
           _Composer(
             controller: _input,
             sending: _sending,
             attachRange: _attachRange,
             attachments: _attachments,
             dark: dark,
+            webSearch: state.webSearchEnabled,
+            onToggleWebSearch: state.toggleWebSearch,
             onPickRange: () => _pickRange(),
             onClearRange: () => setState(() => _attachRange = null),
             onAttach: _showAttachSheet,
@@ -583,6 +610,120 @@ class _ChatScreenState extends State<ChatScreen> {
             onSend: _send,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 联网搜索的状态条:正在搜 / 搜到了几条 / 没搜到。
+///
+/// 存在的理由是"让用户看得见":搜没搜、依据是什么,如果界面上没有任何痕迹,
+/// 用户就没法判断这个回答该不该信。
+class _SearchStatusBar extends StatelessWidget {
+  const _SearchStatusBar({
+    required this.icon,
+    required this.text,
+    required this.dark,
+    this.spinning = false,
+    this.sources = const [],
+  });
+
+  final IconData icon;
+  final String text;
+  final bool dark;
+  final bool spinning;
+  final List<SearchSource> sources;
+
+  @override
+  Widget build(BuildContext context) {
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 0, 14, 4),
+      child: Row(
+        children: [
+          if (spinning)
+            const SizedBox(
+              width: 13,
+              height: 13,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          else
+            Icon(icon, size: 14, color: AppTheme.accent),
+          const SizedBox(width: 7),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: textSecondary),
+            ),
+          ),
+          // 有来源时可以点开看是哪几条。
+          if (sources.isNotEmpty)
+            GestureDetector(
+              onTap: () => _showSources(context, sources, dark),
+              child: Text(
+                '查看',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.accent,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  static void _showSources(
+    BuildContext context,
+    List<SearchSource> sources,
+    bool dark,
+  ) {
+    showModalBottomSheet<void>(
+      context: context,
+      useSafeArea: true,
+      isScrollControlled: true,
+      builder: (context) => DraggableScrollableSheet(
+        expand: false,
+        initialChildSize: 0.6,
+        maxChildSize: 0.9,
+        builder: (context, controller) => ListView(
+          controller: controller,
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+          children: [
+            const Text(
+              '这次搜到的来源',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+            ),
+            const SizedBox(height: 8),
+            for (final source in sources)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      source.title,
+                      style: const TextStyle(fontSize: 14, height: 1.4),
+                    ),
+                    const SizedBox(height: 2),
+                    SelectableText(
+                      source.url,
+                      style: TextStyle(
+                        fontSize: 11.5,
+                        color: dark
+                            ? AppTheme.darkTextSecondary
+                            : AppTheme.lightTextSecondary,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -1446,6 +1587,8 @@ class _Composer extends StatelessWidget {
     required this.attachRange,
     required this.attachments,
     required this.dark,
+    required this.webSearch,
+    required this.onToggleWebSearch,
     required this.onPickRange,
     required this.onClearRange,
     required this.onAttach,
@@ -1459,6 +1602,8 @@ class _Composer extends StatelessWidget {
   final DataRange? attachRange;
   final List<ChatAttachment> attachments;
   final bool dark;
+  final bool webSearch;
+  final VoidCallback onToggleWebSearch;
   final VoidCallback onPickRange;
   final VoidCallback onClearRange;
   final VoidCallback onAttach;
@@ -1540,6 +1685,45 @@ class _Composer extends StatelessWidget {
                     ),
                   ),
                 ],
+                const SizedBox(width: 6),
+                // 联网搜索开关。默认关:一次搜索在服务端是一个完整模型回合,
+                // 花多少由用户自己决定。
+                InkWell(
+                  onTap: onToggleWebSearch,
+                  borderRadius: BorderRadius.circular(20),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: webSearch
+                          ? AppTheme.accent.withValues(alpha: 0.14)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: webSearch
+                            ? AppTheme.accent
+                            : textSecondary.withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          webSearch ? Icons.public : Icons.public_off,
+                          size: 13,
+                          color: webSearch ? AppTheme.accent : textSecondary,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          webSearch ? '联网搜索已开' : '联网搜索',
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            color: webSearch ? AppTheme.accent : textSecondary,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
               ],
             ),
           ),

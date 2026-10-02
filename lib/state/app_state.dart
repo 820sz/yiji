@@ -12,6 +12,7 @@ import 'package:flutter/scheduler.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 
 import '../ai/ai_client.dart';
+import '../ai/search_service.dart';
 import '../ai/goal_matcher.dart';
 import '../ai/prompts.dart';
 import '../ai/settings_store.dart';
@@ -47,6 +48,7 @@ class AppState extends ChangeNotifier {
     required ReportService reports,
     required SettingsStore settings,
     AiClient? aiClient,
+    SearchService? searchService,
     AppUpdater? updater,
     ApkInstaller installer = const ApkInstaller(),
     ReminderNotifier? notifier,
@@ -54,6 +56,7 @@ class AppState extends ChangeNotifier {
         _reports = reports,
         _settings = settings,
         _ai = aiClient ?? AiClient(),
+        _search = searchService ?? SearchService(),
         _updater = updater ?? AppUpdater(),
         _installer = installer,
         _matcher = GoalMatcher(aiClient ?? AiClient()),
@@ -63,6 +66,7 @@ class AppState extends ChangeNotifier {
   final ReportService _reports;
   final SettingsStore _settings;
   final AiClient _ai;
+  final SearchService _search;
   final AppUpdater _updater;
   final ApkInstaller _installer;
   final GoalMatcher _matcher;
@@ -1121,6 +1125,77 @@ class AppState extends ChangeNotifier {
   /// 相当于他平时"把总结贴给 AI"的动作自动化,范围由他自己选。
   /// [attachments] 是本次带上的图片/文件:图片走多模态,文本文件拼进消息正文。
   /// [thinking] 只影响这一次请求,不动全局设置。
+  // ---------- 联网搜索 ----------
+
+  /// 联网搜索开关。**默认关闭**。
+  ///
+  /// 一次搜索在服务端就是一个完整的模型回合(DeepSeek 没有单独的检索接口),
+  /// 延迟和 token 都比普通聊天高一档,所以让用户明确决定这一轮要不要花。
+  bool _webSearchEnabled = false;
+  bool get webSearchEnabled => _webSearchEnabled;
+
+  void toggleWebSearch() {
+    _webSearchEnabled = !_webSearchEnabled;
+    notifyListeners();
+  }
+
+  /// 正在联网搜索。
+  bool _searching = false;
+  bool get searching => _searching;
+
+  /// 上一次联网搜索的结果,挂在聊天气泡前面给用户看来源。
+  SearchOutcome? _lastSearch;
+  SearchOutcome? get lastSearch => _lastSearch;
+
+  /// 这一次搜索有没有失败。失败时会明确告诉用户"没搜到"。
+  String? _searchFailed;
+  String? get searchFailed => _searchFailed;
+
+  /// 该不该为这句话联网。
+  ///
+  /// 开关关着就永远不搜;开着也不是每句都值得搜——"嗯""好的"这种
+  /// 搜了纯属浪费一次模型回合。
+  ///
+  /// 判据故意做得简单直白:太短、或者明显是应答/确认语,就不搜。
+  /// 想让模型自己判断"这句话需不需要联网"的话,就得先花一次请求去问它,
+  /// 那已经是一次完整的模型回合了,反而更贵。
+  static bool looksLikeSearchTopic(String text) {
+    final trimmed = text.trim();
+    if (trimmed.length < 6) return false;
+    const smallTalk = [
+      '嗯', '好的', '收到', '谢谢', '哈哈', '在吗', '继续', '然后呢',
+      'ok', 'OK', '好', '对', '是的', '不是',
+    ];
+    for (final word in smallTalk) {
+      if (trimmed == word) return false;
+    }
+    return true;
+  }
+
+  /// 发消息前先搜一次(仅在开关打开且这句话像个问题时)。
+  ///
+  /// 失败**不阻断聊天**:记下失败原因喂给下一轮,让回答时明确说明
+  /// "这次没搜到,以下是模型自己的知识"——用户选的就是这个行为,
+  /// 静默退回他会分不清回答来自网络还是模型记忆。
+  Future<void> _searchIfNeeded(String text) async {
+    _lastSearch = null;
+    _searchFailed = null;
+    if (!_webSearchEnabled || !looksLikeSearchTopic(text)) return;
+    if (!aiConfig.isUsable) return;
+
+    _searching = true;
+    notifyListeners();
+    try {
+      _lastSearch = await _search.search(apiKey: aiConfig.apiKey, topic: text);
+    } on Exception catch (error) {
+      _searchFailed = SearchService.failureNotice(error);
+    } finally {
+      _searching = false;
+      notifyListeners();
+    }
+  }
+
+  /// 发消息并流式接收回答。
   ///
   /// **只发本会话的历史**:以前这里把全局所有消息都拼进上下文,
   /// 结果是新开的对话能"看到"以前聊过的内容,表现得像无中生有的记忆。
@@ -1132,6 +1207,9 @@ class AppState extends ChangeNotifier {
   }) async* {
     final trimmed = text.trim();
     if (trimmed.isEmpty && attachments.isEmpty) return;
+
+    // 联网放在最前面:它的结果要作为上下文拼进去,晚一步就用不上了。
+    await _searchIfNeeded(trimmed);
 
     // 首次发消息时才把会话落库;标题先留空,发完用它起名。
     var conversationId = _currentConversationId;
@@ -1200,6 +1278,20 @@ class AppState extends ChangeNotifier {
     final history = <AiMessage>[
       AiMessage.system(chatSystemPrompt(memeHint: memeHint)),
     ];
+
+    // 联网搜索的结果排在最前面(人设之后、历史之前)。
+    //
+    // 放这个位置有两个理由:一是它属于"这一轮的事实基础",越早给越不容易
+    // 被长历史挤掉;二是它每轮都在变,放在稳定的前缀之后能少破坏一点 KV 缓存。
+    // 搜索失败时把失败原因也告诉他,并明确要求说明"没搜到"——
+    // 静默退回的话用户分不清回答来自网络还是模型的旧记忆。
+    final search = _lastSearch;
+    if (search != null && !search.isEmpty) {
+      history.add(AiMessage.system(SearchService.formatForContext(search)));
+    } else if (_searchFailed != null) {
+      history.add(AiMessage.system(_searchFailed!));
+    }
+
     if (range != null) {
       // 按选中区间现取数据,而不是复用周报/月报的边界——范围是他自己选的。
       final period = PeriodReport(

@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -94,6 +95,22 @@ class Meme {
 class MemeLibrary {
   MemeLibrary._(this.memes);
 
+  /// 直接从一份索引建库,不读打包资源。
+  ///
+  /// 给"既要准备提示词、又要打真实接口"的测试用:读 assets 需要 widget 绑定,
+  /// 而那个绑定会把所有真实 HTTP 变成 400——两者不能同时要。
+  /// 这类测试改成从磁盘读 index.json 再走这个构造器,两个需求就都满足了。
+  factory MemeLibrary.fromIndex(List<Meme> memes) => MemeLibrary._(memes);
+
+  /// 解析一份索引 JSON(和 assets 里那份格式相同),返回条目。
+  static List<Meme> parseIndex(Object? decoded) {
+    if (decoded is! List) return const [];
+    return [
+      for (final item in decoded)
+        if (item is Map) Meme.fromJson(item.cast<String, Object?>()),
+    ].where((m) => m.file.isNotEmpty).toList();
+  }
+
   final List<Meme> memes;
 
   static const _indexPath = 'assets/memes/index.json';
@@ -123,13 +140,7 @@ class MemeLibrary {
     if (cached != null) return cached;
     try {
       final raw = await rootBundle.loadString(_indexPath);
-      final decoded = jsonDecode(raw);
-      if (decoded is! List) return _cached = MemeLibrary._(const []);
-      final memes = [
-        for (final item in decoded)
-          if (item is Map) Meme.fromJson(item.cast<String, Object?>()),
-      ].where((m) => m.file.isNotEmpty).toList();
-      return _cached = MemeLibrary._(memes);
+      return _cached = MemeLibrary._(parseIndex(jsonDecode(raw)));
     } catch (_) {
       // 素材没打进包(比如某些构建变体)时,表情包功能静默不可用,
       // 其余聊天功能照常。

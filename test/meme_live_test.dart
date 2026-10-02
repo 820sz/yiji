@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -18,7 +19,12 @@ import 'package:yiji/data/meme_directive.dart';
 /// flutter test test/meme_live_test.dart
 /// ```
 void main() {
-  TestWidgetsFlutterBinding.ensureInitialized();
+  // **不能**调 TestWidgetsFlutterBinding.ensureInitialized():
+  // 它会装上 HttpOverrides,让**所有**真实 HTTP 请求直接返回 400 且响应体为空。
+  // 那看起来和"限流"一模一样——我为这个假象排查了很久,方向全错。
+  //
+  // 但读打包资源(rootBundle)又需要那个绑定。两边冲突的解法是**绕开 assets**:
+  // 直接从磁盘读同一份 index.json,构造出图库。两边都要,就两条路各走各的。
 
   final apiKey = Platform.environment['DEEPSEEK_API_KEY'] ?? '';
   final enabled = Platform.environment['MEME_LIVE'] == '1';
@@ -31,6 +37,18 @@ void main() {
   }
 
   final config = AiConfig(apiKey: apiKey);
+
+  /// 从磁盘读索引建库。
+  ///
+  /// 和 assets 里那份是同一个文件(仓库里 `assets/memes/index.json`),
+  /// 只是绕开了 rootBundle,所以不需要 widget 绑定。
+  MemeLibrary libraryFromDisk() {
+    final file = File('assets/memes/index.json');
+    expect(file.existsSync(), isTrue, reason: '找不到 ${file.path}');
+    return MemeLibrary.fromIndex(
+      MemeLibrary.parseIndex(jsonDecode(file.readAsStringSync())),
+    );
+  }
 
   Future<String> ask(String userText, String hint) async {
     final client = AiClient();
@@ -49,7 +67,7 @@ void main() {
   }
 
   test('庆祝的场景要抄一条清单里的原文,并且能定位到图', () async {
-    final library = await MemeLibrary.load();
+    final library = libraryFromDisk();
     expect(library.memes, isNotEmpty, reason: '图库没读出来,先查资源打包');
     final hint = memeHintPrompt(library.catalogPrompt());
 
@@ -93,7 +111,7 @@ void main() {
   }, timeout: const Timeout(Duration(minutes: 3)));
 
   test('认真问事时不发图', () async {
-    final library = await MemeLibrary.load();
+    final library = libraryFromDisk();
     final hint = memeHintPrompt(library.catalogPrompt());
     final reply = await ask('帮我把这周的不足整理成三条,我要写进周报。', hint);
     final directive = stripMemeDirective(reply);
