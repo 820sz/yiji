@@ -275,8 +275,51 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 仅对本次对话生效的思考强度;null 表示跟随设置。
   ThinkingLevel? _overrideThinking;
 
+  /// 每个会话各自记住滚到哪了。
+  ///
+  /// 用户报过"有概率切换对话后,返回后无法停留在上次的进度那":以前换会话
+  /// 一律重新滚到底,长对话翻回去就找不着刚才看的地方了。
+  final Map<int, double> _scrollMemory = {};
+
+  /// 是否已经离开底部。决定要不要显示"回到底部"按钮。
+  bool _awayFromBottom = false;
+
+  /// 上一次看到的当前会话 id。用来发现"用户换了个对话"。
+  int _lastConversationId = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    _scroll.addListener(_onScroll);
+  }
+
+  void _onScroll() {
+    if (!_scroll.hasClients) return;
+    final position = _scroll.position;
+    // 往上留一点余量:刚到底部时按钮不该闪出来。
+    final away = position.maxScrollExtent - position.pixels > 80;
+    if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
+  }
+
+  /// 离开某个会话时把当前滚动位置记下来。
+  void _rememberScroll(int conversationId) {
+    if (!_scroll.hasClients || conversationId == 0) return;
+    _scrollMemory[conversationId] = _scroll.position.pixels;
+  }
+
+  /// 切到某个会话后恢复它上次的位置。没记录过就到底部(新消息在下面)。
+  void _restoreScroll(int conversationId) {
+    final saved = _scrollMemory[conversationId];
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!_scroll.hasClients) return;
+      final target = saved ?? _scroll.position.maxScrollExtent;
+      _scroll.jumpTo(target.clamp(0.0, _scroll.position.maxScrollExtent));
+    });
+  }
+
   @override
   void dispose() {
+    _scroll.removeListener(_onScroll);
     _subscription?.cancel();
     _input.dispose();
     _scroll.dispose();
@@ -294,6 +337,16 @@ class _ChatScreenState extends State<ChatScreen> {
         _scroll.jumpTo(target);
       }
     });
+  }
+
+  /// 滚到指定位置(回顶用)。
+  void _animateTo(double target) {
+    if (!_scroll.hasClients) return;
+    _scroll.animateTo(
+      target.clamp(0.0, _scroll.position.maxScrollExtent),
+      duration: AppTheme.medium,
+      curve: AppTheme.easeOut,
+    );
   }
 
   Future<void> _send() async {
@@ -406,6 +459,18 @@ class _ChatScreenState extends State<ChatScreen> {
     // 这个对话自己的头像;没设过时回落到全局设置里那个。
     final aiAvatar = state.currentConversationAvatar ?? state.avatarBytes;
 
+    // 会话切换时:先记下旧会话的滚动位置,再恢复新会话的位置。
+    //
+    // 放在 build 里判断而不是去改侧边栏:切换会话有好几个入口(侧边栏、
+    // 新建、删除后自动选中的那条),每个都去调一次很容易漏;而
+    // "当前会话 id 变了"这件事在 build 里一定能看到。
+    final conversationId = state.currentConversationId;
+    if (conversationId != _lastConversationId) {
+      if (_lastConversationId != 0) _rememberScroll(_lastConversationId);
+      _lastConversationId = conversationId;
+      _restoreScroll(conversationId);
+    }
+
     return Scaffold(
       // 侧边栏挂在这里:会话列表要从左边滑出来,而且不该占着正文的位置。
       key: _scaffoldKey,
@@ -459,6 +524,35 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
           ),
+          // 回顶/回底。
+          //
+          // 用户明确要过("缺少↓和↑的回顶回底功能")。长对话里往上翻几十屏之后,
+          // 想回到最新一条要么一直滑、要么下拉刷新;这里给两个直达按钮。
+          // 停在底部时只显示「回顶」(不挡视线),离开底部后两个都给。
+          if (messages.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 0, 14, 4),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  _JumpButton(
+                    icon: Icons.vertical_align_top,
+                    tooltip: '回到最早',
+                    dark: dark,
+                    onTap: () => _animateTo(0),
+                  ),
+                  if (_awayFromBottom) ...[
+                    const SizedBox(width: 8),
+                    _JumpButton(
+                      icon: Icons.vertical_align_bottom,
+                      tooltip: '回到最新',
+                      dark: dark,
+                      onTap: () => _scrollToBottom(animate: true),
+                    ),
+                  ],
+                ],
+              ),
+            ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
@@ -489,6 +583,46 @@ class _ChatScreenState extends State<ChatScreen> {
             onSend: _send,
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 聊天列表上方那个"回顶/回底"小圆钮。
+///
+/// 做得克制:半透明、平时不抢视线,但命中区撑到 36,单手也好点。
+class _JumpButton extends StatelessWidget {
+  const _JumpButton({
+    required this.icon,
+    required this.tooltip,
+    required this.dark,
+    required this.onTap,
+  });
+
+  final IconData icon;
+  final String tooltip;
+  final bool dark;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    return Tooltip(
+      message: tooltip,
+      child: Material(
+        color: (dark ? AppTheme.darkSurface : Colors.white).withValues(alpha: 0.92),
+        shape: const CircleBorder(),
+        elevation: 1,
+        child: InkWell(
+          onTap: onTap,
+          customBorder: const CircleBorder(),
+          child: SizedBox(
+            width: 36,
+            height: 36,
+            child: Icon(icon, size: 19, color: textSecondary),
+          ),
+        ),
       ),
     );
   }
@@ -1014,68 +1148,91 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    // 两侧都要放头像,所以气泡可用宽度要比只有一侧时更窄一点。
-    final maxWidth = MediaQuery.of(context).size.width * 0.68;
+    // 气泡宽度上限。QQ/微信那种紧凑感来自"气泡贴着内容",所以这里比常见
+    // 的 0.75 再收一点:长句换行更早,但右侧留白也跟着变少。
+    final maxWidth = MediaQuery.of(context).size.width * 0.66;
 
     // 正文里可能夹着图片行(`![图] <引用>`)。要把它们**画成图**,
     // 而不是把那一行当文字显示出来——用户发的是照片,不是文件名。
     final parts = splitMessageParts(text);
-    final hasImage = parts.any((part) => part.image != null);
+    final images = [for (final part in parts) if (part.image != null) part.image!];
+    final texts = [
+      for (final part in parts)
+        if (part.image == null && part.text.trim().isNotEmpty) part.text.trim(),
+    ];
+    // **全是图、没有文字**时不画气泡。
+    //
+    // 用户明确说过图"所占 ui 空间太大了…像 qq 那样":QQ 和微信里表情包
+    // 就是一张圆角缩略图,外面没有气泡壳、也没有那一圈内边距。
+    // 图本来就自带留白,再套一层壳就是白占地方。
+    final bare = images.isNotEmpty && texts.isEmpty;
 
     return Padding(
-      padding: const EdgeInsets.only(bottom: 10),
+      // 消息之间的间隔也收一点:原来 10 加上气泡内边距,一屏放不下几条。
+      padding: const EdgeInsets.only(bottom: 8),
       child: Row(
         mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser) ...[
-            AiAvatar(provider: provider, bytes: avatar, dark: dark, size: 30),
-            const SizedBox(width: 10),
+            AiAvatar(provider: provider, bytes: avatar, dark: dark, size: 28),
+            const SizedBox(width: 8),
           ],
           Flexible(
-            child: Container(
-              // 图片要占满更宽的位置,所以有图时放宽到 0.72 屏宽。
-              constraints: BoxConstraints(maxWidth: hasImage ? maxWidth * 1.15 : maxWidth),
-              padding: EdgeInsets.symmetric(
-                horizontal: hasImage ? 8 : 14,
-                vertical: hasImage ? 8 : 11,
-              ),
-              decoration: BoxDecoration(
-                color: isUser ? AppTheme.accent : surface,
-                borderRadius: BorderRadius.circular(16),
-              ),
-              child: Column(
-                crossAxisAlignment:
-                    isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                children: [
-                  for (final part in parts)
-                    if (part.image != null)
-                      _MessageImage(image: part.image!, isUser: isUser)
-                    else if (part.text.trim().isNotEmpty)
-                      Padding(
-                        padding: EdgeInsets.symmetric(
-                          horizontal: hasImage ? 6 : 0,
-                          vertical: hasImage ? 3 : 0,
-                        ),
-                        child: SelectableText(
-                          part.text.trim(),
-                          style: TextStyle(
-                            fontSize: 15,
-                            height: 1.62,
-                            color: isUser ? Colors.white : textPrimary,
+            child: bare
+                ? Column(
+                    crossAxisAlignment: isUser
+                        ? CrossAxisAlignment.end
+                        : CrossAxisAlignment.start,
+                    children: [
+                      for (final image in images)
+                        _MessageImage(image: image, isUser: isUser),
+                    ],
+                  )
+                : Container(
+                    constraints: BoxConstraints(
+                      // 有图时稍微放宽一点,但仍然不让一张图吃掉半屏。
+                      maxWidth: images.isNotEmpty ? maxWidth * 1.1 : maxWidth,
+                    ),
+                    padding: EdgeInsets.symmetric(
+                      horizontal: images.isNotEmpty ? 7 : 12,
+                      vertical: images.isNotEmpty ? 7 : 9,
+                    ),
+                    decoration: BoxDecoration(
+                      color: isUser ? AppTheme.accent : surface,
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: isUser
+                          ? CrossAxisAlignment.end
+                          : CrossAxisAlignment.start,
+                      children: [
+                        for (final image in images)
+                          _MessageImage(image: image, isUser: isUser),
+                        for (var i = 0; i < texts.length; i++)
+                          Padding(
+                            padding: EdgeInsets.only(
+                              top: images.isNotEmpty && i == 0 ? 4 : 0,
+                            ),
+                            child: SelectableText(
+                              texts[i],
+                              style: TextStyle(
+                                fontSize: 15,
+                                height: 1.5,
+                                color: isUser ? Colors.white : textPrimary,
+                              ),
+                            ),
                           ),
-                        ),
-                      ),
-                ],
-              ),
-            ),
+                      ],
+                    ),
+                  ),
           ),
           if (streaming)
             const Padding(
-              padding: EdgeInsets.only(left: 8, top: 12),
+              padding: EdgeInsets.only(left: 6, top: 10),
               child: SizedBox(
-                width: 10,
-                height: 10,
+                width: 9,
+                height: 9,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             ),
@@ -1163,15 +1320,22 @@ class _MessageImage extends StatelessWidget {
             },
           );
 
+    // 尺寸按来源分档。
+    //
+    // 用户说过图"所占 ui 空间太大了…像 qq 那样":表情包在 QQ/微信里就是
+    // 一张小方图,而 240×240 在手机上接近大半屏宽,一屏看不了两条消息。
+    // 表情包(内置图库)本来就只要表达情绪,140 够看清;
+    // 用户自己拍的照片要多留些细节,给到 200。
+    final limit = image.isAsset ? 140.0 : 200.0;
+
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 3),
+      padding: const EdgeInsets.symmetric(vertical: 2),
       child: ClipRRect(
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(10),
         child: GestureDetector(
           onTap: () => _openFullScreen(context, image),
           child: ConstrainedBox(
-            // 缩略图不让它撑满整屏:聊天记录要能一眼扫过。
-            constraints: const BoxConstraints(maxHeight: 240, maxWidth: 240),
+            constraints: BoxConstraints(maxHeight: limit, maxWidth: limit),
             child: source,
           ),
         ),

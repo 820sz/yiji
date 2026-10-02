@@ -237,5 +237,26 @@ void main() {
       await tester.pumpAndSettle();
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('图片尺寸是"表情包大小",不占半屏', (tester) async {
+      // 用户说过图"所占 ui 空间太大了…像 qq 那样"。以前上限 240,
+      // 在手机上接近大半屏宽,一屏放不下两条消息。
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: ChatBubbleProbe(text: '![图] asset:memes/happy/1.webp'),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final box = tester.getSize(find.byType(Image));
+      expect(
+        box.width,
+        lessThanOrEqualTo(141),
+        reason: '表情包缩略图不该超过 140,实际 ${box.width}',
+      );
+      expect(box.height, lessThanOrEqualTo(141));
+    });
   });
 }
