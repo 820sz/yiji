@@ -20,11 +20,16 @@ class GoalMatcher {
   ///
   /// [suggestNewGoals] 为真时,还会让模型指出"哪些做完的事还没有对应的推进条",
   /// 一次给你一批可以一键补上的目标。不传就不问——那只在看历史数据时才有意义。
+  ///
+  /// [onProgress] 每收到一段就调一次,内容是**已经收到的原文**。
+  /// 界面拿它显示"正在读"的过程,而不是干转圈——用户报过"ai的流式输出ui
+  /// (而不是现在的转圈等待)"。
   Future<GoalMatchResult> match({
     required AiConfig config,
     required List<Goal> goals,
     required List<Task> tasks,
     bool suggestNewGoals = true,
+    void Function(String partial)? onProgress,
   }) async {
     if (tasks.isEmpty) return const GoalMatchResult();
     // 一条目标都没有时更该问"要不要建":这正是新用户第一次同步的情形。
@@ -45,19 +50,12 @@ class GoalMatcher {
       for (var i = 0; i < tasks.length; i++) '${i + 1} | ${tasks[i].text}',
     ].join('\n');
 
-    final raw = await _ai.complete(
+    final raw = await _complete(
       config: config,
-      jsonMode: true,
-      history: [
-        AiMessage.system(
-          goalMatchPrompt(
-            goalsBlock: goalsBlock,
-            tasksBlock: tasksBlock,
-            suggestNewGoals: suggestNewGoals,
-          ),
-        ),
-        AiMessage.user('请给出 json 格式的结果。'),
-      ],
+      goalsBlock: goalsBlock,
+      tasksBlock: tasksBlock,
+      suggestNewGoals: suggestNewGoals,
+      onProgress: onProgress,
     );
 
     return _parse(
@@ -66,6 +64,50 @@ class GoalMatcher {
       tasks: tasks,
       suggestNewGoals: suggestNewGoals,
     );
+  }
+
+  /// 发一次请求并把分片拼成完整回复。
+  ///
+  /// 用 `streamChat` 而不是 `complete`,只为了能**边收边报进度**:
+  /// `complete` 在拿到完整回复之前什么都给不出来,界面只能转圈。
+  /// 这里自己拼 JSON,顺带把每次收到的内容交给 [onProgress]。
+  ///
+  /// 空回复重试一次的行为和 `complete` 保持一致:JSON 模式下服务端有概率
+  /// 返回空 content,直接当失败会白白浪费一次调用。
+  Future<String> _complete({
+    required AiConfig config,
+    required String goalsBlock,
+    required String tasksBlock,
+    required bool suggestNewGoals,
+    void Function(String partial)? onProgress,
+  }) async {
+    final history = [
+      AiMessage.system(
+        goalMatchPrompt(
+          goalsBlock: goalsBlock,
+          tasksBlock: tasksBlock,
+          suggestNewGoals: suggestNewGoals,
+        ),
+      ),
+      AiMessage.user('请给出 json 格式的结果。'),
+    ];
+
+    for (var attempt = 0; attempt < 2; attempt++) {
+      final buffer = StringBuffer();
+      await for (final chunk in _ai.streamChat(
+        config: config,
+        history: history,
+        jsonMode: true,
+      )) {
+        // 思考内容不算进度:用户要看的是它读出来了什么,不是它在想什么。
+        if (chunk.isReasoning) continue;
+        buffer.write(chunk.text);
+        onProgress?.call(buffer.toString());
+      }
+      final text = buffer.toString().trim();
+      if (text.isNotEmpty) return text;
+    }
+    throw AiException('模型没有返回内容,再试一次');
   }
 
   /// 解析模型回包。

@@ -37,6 +37,9 @@ void main() {
   /// 在 pumpApp 之前就要定好的流式分片(思考过程 + 回答)。
   List<AiChunk>? presetChunks;
 
+  /// 让假客户端慢一点回复,好观察"正在读"这类中间状态。
+  Duration? replyDelay;
+
   /// 界面默认打开"今天",所以场景数据要挂在真实今天上;
   /// 写死日期会让测试随运行日期飘。
   final today = todayKey();
@@ -47,7 +50,11 @@ void main() {
       if (withKey) 'ai_api_key': 'sk-test',
       if (withDarkMode) 'ui_dark_mode': true,
     });
-    ai = _FakeAi(presetReply: presetReply, presetChunks: presetChunks);
+    ai = _FakeAi(
+      presetReply: presetReply,
+      presetChunks: presetChunks,
+      replyDelay: replyDelay,
+    );
     state = AppState(
       store: store,
       reports: ReportService(store),
@@ -62,6 +69,10 @@ void main() {
     store = FakeStore();
     presetReply = null;
     presetChunks = null;
+    // 这几条是**跨用例的全局量**,每条用例自己会按需要设置;
+    // 忘了在这里清掉的话,上一条留的延迟会把后面每条都拖慢,
+    // 表现为一批互不相关的用例一起失败(踩过一次)。
+    replyDelay = null;
   });
 
   Future<void> openTab(WidgetTester tester, String label) async {
@@ -415,6 +426,11 @@ void main() {
       await tester.tap(find.byIcon(Icons.auto_awesome));
       await tester.pumpAndSettle();
 
+      // 先问"读多久",再开始同步——以前写死本周,攒了几周的人永远读不到。
+      expect(find.text('让 AI 读多久的记录?'), findsOneWidget);
+      await tester.tap(find.text('近 14 天'));
+      await tester.pumpAndSettle();
+
       expect(find.text('AI 读到的推进'), findsOneWidget);
       expect(find.text('小说推进  +2000 字'), findsOneWidget);
       expect(find.textContaining('待办写了码字2k'), findsOneWidget);
@@ -441,6 +457,8 @@ void main() {
       await openTab(tester, '进度');
       await tester.tap(find.byIcon(Icons.auto_awesome));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('本周'));
+      await tester.pumpAndSettle();
 
       await tester.tap(find.text('小说推进  +2000 字'));
       await tester.pumpAndSettle();
@@ -461,9 +479,45 @@ void main() {
       await openTab(tester, '进度');
       await tester.tap(find.byIcon(Icons.auto_awesome));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('本周'));
+      await tester.pumpAndSettle();
 
       expect(find.textContaining('没有能对上目标的数字'), findsOneWidget);
       expect(find.text('0 / 1万 字'), findsOneWidget);
+    });
+
+    testWidgets('同步走的是"选范围 → 读 → 审阅"这条路,不再写死本周', (tester) async {
+      // 用户明确要求过"需增加进度用户选取范围"。这里盯住这条路是通的:
+      // 选了范围之后,建议照常出来、确认后才落库。
+      //
+      // **不在这里盯"对话框里逐字增长"**:假客户端瞬时返回,对话框一帧就
+      // 关了,为此调慢假客户端又会把假时钟搅乱(转圈动画永不停止,
+      // pumpAndSettle 必超时)。流式那段由 pending_sync_test 在状态层验证。
+      final goal = store.seedGoal(title: '小说推进', unit: '字', target: 10000);
+      store.seedTask(today, '上午 码字2k', done: true);
+      presetReply = jsonEncode({
+        'matches': [
+          {'task': 1, 'goal': 1, 'amount': 2000, 'reason': '码字2k'},
+        ],
+      });
+
+      await pumpApp(tester, withKey: true);
+      await openTab(tester, '进度');
+      await tester.tap(find.byIcon(Icons.auto_awesome));
+      await tester.pumpAndSettle();
+
+      // 五档范围都在。
+      for (final label in ['本周', '近 7 天', '近 14 天', '近 30 天', '近 90 天']) {
+        expect(find.text(label), findsOneWidget, reason: '缺少「$label」这一档');
+      }
+
+      await tester.tap(find.text('近 30 天'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('小说推进  +2000 字'), findsOneWidget);
+      await tester.tap(find.text('确认这 1 项'));
+      await tester.pumpAndSettle();
+      expect((await store.goals()).firstWhere((g) => g.id == goal.id).current, 2000);
     });
   });
 
@@ -1316,13 +1370,19 @@ final _defaultPicker = FilePickerPlatform.instance;
 ///
 /// 测的是"拿到这些流式分片之后界面怎么表现",所以不联网、也不依赖真实模型。
 class _FakeAi extends http.BaseClient {
-  _FakeAi({this.presetReply, this.presetChunks});
+  _FakeAi({this.presetReply, this.presetChunks, this.replyDelay});
 
   /// 一次性返回的完整回答(用于 JSON 匹配这类要整段的场景)。
   final String? presetReply;
 
   /// 指定时按这些分片依次流式返回。
   final List<AiChunk>? presetChunks;
+
+  /// 回复前先等一会儿。
+  ///
+  /// 给"正在读"这类**中间状态**的用例用:客户端瞬时返回的话,对话框
+  /// 弹出来又立刻关掉,根本观察不到。默认 null(不拖慢其他用例)。
+  final Duration? replyDelay;
 
   /// 最近一次请求体。用来断言"发出去的东西里到底有没有附件"。
   Map<String, Object?>? lastBody;
@@ -1367,7 +1427,15 @@ class _FakeAi extends http.BaseClient {
         )
         .join('\n\n');
     return http.StreamedResponse(
-      Stream.fromIterable([utf8.encode('$body\n\ndata: [DONE]\n\n')]),
+      replyDelay == null
+          ? Stream.fromIterable([utf8.encode('$body\n\ndata: [DONE]\n\n')])
+          : Stream.fromIterable([utf8.encode('$body\n\ndata: [DONE]\n\n')])
+              .asyncExpand(
+              (frame) => Stream.fromIterable([frame]).asyncMap((f) async {
+                await Future<void>.delayed(replyDelay!);
+                return f;
+              }),
+            ),
       200,
       headers: {'content-type': 'text/event-stream'},
     );

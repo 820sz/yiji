@@ -1,7 +1,10 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import '../core/day.dart';
+import '../data/data_range.dart';
 import '../data/goals.dart';
 import '../data/palette.dart';
 import '../state/app_state.dart';
@@ -113,25 +116,43 @@ class ProgressScreen extends StatelessWidget {
     );
   }
 
-  /// 让 AI 读本周已完成的待办,给出建议后交给用户确认。
+  /// 选一段日期,让 AI 读这段时间的已完成待办。
+  ///
+  /// 以前写死"本周":攒两三周没整理的人一次只能整理一周,剩下的永远读不到。
+  /// 用户明确要求过"需增加进度用户选取范围(比如用户自选读取整理多久日期之类的信息)"。
   Future<void> _sync(BuildContext context) async {
     final state = AppScope.of(context);
     if (!state.aiConfig.isUsable) {
       _toast(context, '还没填 API key,去「我的」里填一下');
       return;
     }
-    try {
-      final count = await state.requestProgressSuggestions();
-      if (!context.mounted) return;
-      if (count == 0) {
-        _toast(context, '本周完成的待办里没有能对上目标的数字');
-        return;
-      }
-      await _reviewSuggestions(context);
-    } on Exception catch (error) {
-      if (!context.mounted) return;
-      _toast(context, error.toString());
+
+    final range = await showModalBottomSheet<DataRange>(
+      context: context,
+      useSafeArea: true,
+      builder: (_) => const _SyncRangeSheet(),
+    );
+    if (range == null || !context.mounted) return;
+
+    // 用**带流式输出**的对话框等结果,而不是一个转圈。
+    //
+    // 用户明确要求过"ai 的流式输出 ui(而不是现在的转圈等待)"。进度同步
+    // 要读一批待办、再等模型吐一段 JSON,几秒到十几秒;转圈只说明"在忙",
+    // 看不出它在干什么,也分不清是卡住了还是真的在跑。
+    //
+    // 让**对话框自己发请求**:先 pop 请求的写法在快客户端下会变成
+    // "请求已完成 → 对话框还没画出来就要关掉",测试里连一帧都抓不到。
+    final count = await showDialog<int>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _SyncProgressDialog(range: range),
+    );
+    if (!context.mounted || count == null) return;
+    if (count == 0) {
+      _toast(context, '${range.label}里没有能对上目标的数字');
+      return;
     }
+    await _reviewSuggestions(context);
   }
 
   /// 展示 AI 的建议,逐条可勾选,确认后才落库。
@@ -242,6 +263,160 @@ class ProgressScreen extends StatelessWidget {
 }
 
 /// 进度条同步按钮。带未同步条数的角标——没有角标时他根本不会想起来点。
+/// 选同步范围:让 AI 读多久的已完成待办。
+///
+/// 以前写死"本周"。攒了两三周没整理的人一次只能整理一周,剩下那些永远读不到,
+/// 而且待同步角标会一直挂着——他明明有内容可同步,却被告知"没有能对上的数字"。
+/// 用户明确要求过"需增加进度用户选取范围(比如用户自选读取整理多久日期之类的信息)"。
+class _SyncRangeSheet extends StatelessWidget {
+  const _SyncRangeSheet();
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+
+    final options = <(String, DataRange)>[
+      ('本周', DataRange.between(mondayOf(todayKey()), sundayOf(todayKey()))),
+      ('近 7 天', DataRange.lastDays(7)),
+      ('近 14 天', DataRange.lastDays(14)),
+      ('近 30 天', DataRange.lastDays(30)),
+      ('近 90 天', DataRange.lastDays(90)),
+    ];
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        // 五档 + 标题在小屏上会超出弹层的最大高度(实测溢出 67px),
+        // 包一层滚动比调高度稳:字号或档位以后变了也不会再撞。
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '让 AI 读多久的记录?',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: textPrimary,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '只读这段时间里还没整理过的已完成待办。',
+                style: TextStyle(fontSize: 12.5, height: 1.5, color: textSecondary),
+              ),
+              const SizedBox(height: 8),
+              for (final (label, range) in options)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  title:
+                      Text(label, style: TextStyle(fontSize: 15, color: textPrimary)),
+                  subtitle: Text(
+                    '${shortDateLabel(range.startDay)} - ${shortDateLabel(range.endDay)}',
+                    style: TextStyle(fontSize: 12, color: textSecondary),
+                  ),
+                  onTap: () => Navigator.pop(context, range),
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 同步中的流式对话框。
+///
+/// 展示模型**已经吐出来的原文**,而不是一个转圈。它读的是编号化的 JSON,
+/// 肉眼看当然不好看,但"能看到它在往外吐东西"本身就是用户要的信息:
+/// 证明它在跑、没有卡死。用户明确要求过"用流式输出而不是转圈等待"。
+///
+/// 请求由它自己发起、结束后自己 pop:交给外面的先 pop 后请求,快客户端下
+/// 会变成"刚开就要关",一帧都留不住。
+///
+/// 用等宽小字、低对比色,让它像一段日志而不是正文——它不是给用户读的内容。
+class _SyncProgressDialog extends StatefulWidget {
+  const _SyncProgressDialog({required this.range});
+
+  final DataRange range;
+
+  @override
+  State<_SyncProgressDialog> createState() => _SyncProgressDialogState();
+}
+
+class _SyncProgressDialogState extends State<_SyncProgressDialog> {
+  @override
+  void initState() {
+    super.initState();
+    // 排在下一帧之后再发:让对话框先画出来,用户才看得到"正在读"。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _run());
+  }
+
+  Future<void> _run() async {
+    final state = AppScope.of(context);
+    final navigator = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final count = await state.requestProgressSuggestions(range: widget.range);
+      if (!mounted) return;
+      navigator.pop(count);
+    } on Exception catch (error) {
+      if (!mounted) return;
+      navigator.pop(0);
+      messenger.showSnackBar(SnackBar(content: Text(error.toString())));
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final state = AppScope.of(context);
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+
+    return AlertDialog(
+      title: Row(
+        children: [
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+          const SizedBox(width: 10),
+          Text('正在读你的记录', style: TextStyle(fontSize: 16, color: textPrimary)),
+        ],
+      ),
+      content: SizedBox(
+        // 给定宽高:内容在长,但对话框**不许跟着变大**,否则每来一个字
+        // 整个框就抖一下(就是聊天页当初那个毛病)。
+        width: 300,
+        height: 132,
+        child: AnimatedBuilder(
+          animation: state.streamTick,
+          builder: (context, _) => SingleChildScrollView(
+            reverse: true,
+            child: Text(
+              state.syncProgress.isEmpty ? '正在等第一条结果…' : state.syncProgress,
+              style: TextStyle(
+                fontSize: 11.5,
+                height: 1.45,
+                color: textSecondary,
+                fontFamily: 'monospace',
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _SyncButton extends StatelessWidget {
   const _SyncButton({required this.pending, required this.busy, required this.onTap});
 

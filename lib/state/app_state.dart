@@ -683,24 +683,28 @@ class AppState extends ChangeNotifier {
   Future<List<ProgressEntry>> progressHistory(Goal goal) =>
       _store.progressEntriesOfGoal(goal.id);
 
-  /// 让 AI 读本周已完成的待办,给出进度推进建议。
+  /// 让 AI 读一段时间的已完成待办,给出进度推进建议。
   ///
   /// 只出建议、不落库:确认这一步留给用户,见 [confirmSuggestions]。
   /// 除了"匹配到已有推进条",还会带回"建议新建目标"那一类——用户常常是
   /// 先做事、后想起来要追踪,让他自己去建等于把 AI 该干的活推回给他。
-  Future<int> requestProgressSuggestions() async {
+  ///
+  /// [range] 决定读多久的数据。不传就是本周(日常打钩后自动同步走的就是这条);
+  /// 用户可以自己选更长的一段——他可能攒了两三周才想起来整理一次。
+  Future<int> requestProgressSuggestions({DataRange? range}) async {
     if (!aiConfig.isUsable) {
       throw AiException('还没填 API key,去设置里填一下');
     }
     // 一条目标都没有时也要问:那正是"要不要建第一条"的时机,不能提前返回。
 
     _matching = true;
+    _syncProgress = '';
+    _lastSyncTick = null;
     notifyListeners();
     try {
-      final tasks = await _store.unprocessedDoneTasks(
-        mondayOf(_currentDay),
-        sundayOf(_currentDay),
-      );
+      final start = range?.startDay ?? mondayOf(_currentDay);
+      final end = range?.endDay ?? sundayOf(_currentDay);
+      final tasks = await _store.unprocessedDoneTasks(start, end);
       if (tasks.isEmpty) {
         _suggestions = const [];
         _newGoalSuggestions = const [];
@@ -712,18 +716,44 @@ class AppState extends ChangeNotifier {
         config: aiConfig,
         goals: activeGoals,
         tasks: tasks,
+        // 边读边把原文交给界面显示。
+        //
+        // 这里是**节流**的:每来一个分片就 notifyListeners 会把整个进度页
+        // 重排一遍,那就成了聊天页当初"乱飘"的老毛病。攒够一段再通知一次,
+        // 视觉上仍然是连续在长,但每帧只重建一次。
+        onProgress: (partial) {
+          _syncProgress = partial;
+          final now = DateTime.now();
+          final last = _lastSyncTick;
+          if (last == null || now.difference(last).inMilliseconds >= 120) {
+            _lastSyncTick = now;
+            notifyListeners();
+          }
+        },
       );
       _suggestions = result.matches;
       _newGoalSuggestions = result.newGoals;
       return result.length;
     } finally {
       _matching = false;
+      // 收尾时清掉流式原文:它的作用只是"让你看到在读什么",
+      // 结果出来之后留在界面上会让人以为还在跑。
+      _syncProgress = '';
       notifyListeners();
     }
   }
 
-  /// 上一次让 AI 读过的那批待办 id。
+  /// 正在同步进度时,模型已经吐出来的原文。
   ///
+  /// 界面拿它显示"正在读"的过程。用户明确要求过"ai的流式输出ui
+  /// (而不是现在的转圈等待)"——转圈只说明"在忙",看不出它在干什么。
+  String _syncProgress = '';
+  String get syncProgress => _syncProgress;
+
+  /// 上次把 [syncProgress] 推给界面的时间,用来节流。
+  DateTime? _lastSyncTick;
+
+  /// 上一次让 AI 读过的那批待办 id。  ///
   /// 确认阶段要把它们标成"处理过了",角标才会掉。**不管用户勾了几条**都要标:
   /// 「取快递」这类永远匹配不上推进条的事,处理结果就是"没有结果"——
   /// 那也算处理过了,否则它永远留在待同步计数里,角标怎么都清不掉。
