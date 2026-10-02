@@ -20,8 +20,12 @@ class _FakeClient extends http.BaseClient {
   http.BaseRequest? lastRequest;
   String? lastBody;
 
+  /// 被调用了几次。用来验证限流重试真的重发了。
+  int calls = 0;
+
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    calls++;
     lastRequest = request;
     if (request is http.Request) {
       lastBody = utf8.decode(request.bodyBytes);
@@ -30,6 +34,38 @@ class _FakeClient extends http.BaseClient {
     return http.StreamedResponse(
       Stream.fromIterable(bytes),
       status,
+      headers: {'content-type': 'text/event-stream'},
+    );
+  }
+}
+
+/// 先按脚本连续失败若干次,然后成功。
+///
+/// 专门用来验证"限流窗口自动重试":这个接口在请求密集时会进入一段窗口,
+/// **所有**请求都返回 400 且响应体为空,等一会儿自己恢复。
+class _FlakyClient extends http.BaseClient {
+  _FlakyClient({required this.failures, required this.successBody});
+
+  /// 前几次返回空体的 400。
+  final int failures;
+  final String successBody;
+
+  int calls = 0;
+
+  @override
+  Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    calls++;
+    if (calls <= failures) {
+      // 限流窗口的特征:**400 + 空体**。
+      return http.StreamedResponse(
+        Stream.fromIterable([<int>[]]),
+        400,
+        headers: {'content-type': 'text/event-stream'},
+      );
+    }
+    return http.StreamedResponse(
+      Stream.fromIterable([utf8.encode(successBody)]),
+      200,
       headers: {'content-type': 'text/event-stream'},
     );
   }
@@ -56,6 +92,70 @@ List<String> _content(List<AiChunk> chunks) =>
     chunks.where((c) => !c.isReasoning).map((c) => c.text).toList();
 
 void main() {
+  group('限流窗口自动重试', () {
+    // 这个接口在请求密集时会进入一段窗口:**所有**请求都返回 400、响应体为空,
+    // 连"只有一句 user"的最简请求也一样,等几十秒自己恢复。
+    // 用户看到的是"聊着聊着突然全都不行了",而他什么都没做错。
+    test('撞上窗口会退避重发,最终成功', () async {
+      final client = _FlakyClient(
+        failures: 2,
+        successBody: _sse(['回来了']),
+      );
+      final ai = AiClient(httpClient: client);
+      addTearDown(ai.dispose);
+
+      final chunks = await ai.streamChat(
+        config: _config,
+        history: [AiMessage.user('你好')],
+      ).toList();
+
+      expect(_content(chunks), ['回来了']);
+      expect(client.calls, 3, reason: '前两次空体 400、第三次成功,应当发了三次');
+    }, timeout: const Timeout(Duration(seconds: 60)));
+
+    test('重试用尽还是失败,就如实报错', () async {
+      // 一直空体 400:重试 3 次之后放弃,并且错误信息要说明"可能是限流"。
+      final client = _FlakyClient(failures: 99, successBody: '');
+      final ai = AiClient(httpClient: client);
+      addTearDown(ai.dispose);
+
+      await expectLater(
+        ai.streamChat(
+          config: _config,
+          history: [AiMessage.user('你好')],
+        ).toList(),
+        throwsA(
+          isA<AiException>().having(
+            (e) => e.message,
+            'message',
+            contains('限流'),
+          ),
+        ),
+      );
+      expect(client.calls, 4, reason: '首次 + 3 次重试');
+    }, timeout: const Timeout(Duration(seconds: 90)));
+
+    test('带说明的 400 不重试(那是真的参数错了)', () async {
+      // 参数错误和限流窗口都返回 400,区别在于**响应体有没有说明**。
+      // 参数错也重试的话,用户要多等 30 秒才看到错误。
+      final client = _FakeClient(
+        status: 400,
+        body: '{"error":{"message":"model not found"}}',
+      );
+      final ai = AiClient(httpClient: client);
+      addTearDown(ai.dispose);
+
+      await expectLater(
+        ai.streamChat(
+          config: _config,
+          history: [AiMessage.user('你好')],
+        ).toList(),
+        throwsA(isA<AiException>()),
+      );
+      expect(client.calls, 1, reason: '有说明的 400 不该重试');
+    });
+  });
+
   group('请求构造', () {
     test('默认地址和模型按官方文档走', () {
       expect(AiConfig.defaultBaseUrl, 'https://api.deepseek.com');

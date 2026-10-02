@@ -184,15 +184,30 @@ class AiClient {
         }),
       );
 
-    final http.StreamedResponse response;
-    try {
-      response = await _http.send(request);
-    } on Exception catch (error) {
-      throw AiException('连不上服务器,检查一下网络: $error');
+    // 撞上限流窗口时自动重试。
+    //
+    // 这个接口在请求密集时会进入一段窗口:**所有**请求都返回 400、响应体为空,
+    // 连"只有一句 user"的最简请求也一样,等几十秒自己恢复(实测:连续成功
+    // 12 次之后进入窗口,再等 30 秒左右恢复)。
+    //
+    // 用户感知到的是"聊着着突然全都不行了",而他什么都没做错。所以这里
+    // 退避重试,而不是把这个窗口原样丢给他看。
+    var response = await _sendOnce(request);
+    var body = response.statusCode == 200
+        ? ''
+        : await response.stream.bytesToString();
+
+    for (var attempt = 0;
+        attempt < _throttleRetries && _isThrottleWindow(response.statusCode, body);
+        attempt++) {
+      await Future<void>.delayed(_throttleBackoff * (attempt + 1));
+      response = await _sendOnce(request);
+      body = response.statusCode == 200
+          ? ''
+          : await response.stream.bytesToString();
     }
 
     if (response.statusCode != 200) {
-      final body = await response.stream.bytesToString();
       throw AiException(
         _describeError(response.statusCode, body),
         statusCode: response.statusCode,
@@ -301,7 +316,30 @@ class AiClient {
     return detail == null ? hint : '$hint:$detail';
   }
 
-  /// 容忍用户把 base_url 填成带结尾斜杠的写法。
+  /// 限流窗口的重试参数。
+  ///
+  /// 3 次 × (5s、10s、15s) 共 30 秒:实测这个窗口大约 30 秒就恢复,
+  /// 再等下去用户会觉得界面卡死,而重试太密又只是白刷失败。
+  static const _throttleRetries = 3;
+  static const _throttleBackoff = Duration(seconds: 5);
+
+  /// 发一次请求。连不上时抛 [AiException]。
+  Future<http.StreamedResponse> _sendOnce(http.BaseRequest request) async {
+    try {
+      return await _http.send(request);
+    } on Exception catch (error) {
+      throw AiException('连不上服务器,检查一下网络: $error');
+    }
+  }
+
+  /// 这个响应是不是"限流窗口"。
+  ///
+  /// 判据是 **400 + 空响应体**:正常的参数错误会带一句说明,只有限流窗口
+  /// 才是空体。不能把普通 400 也重试——那是真的参数或模型名不对,
+  /// 重试三次只会让用户多等 30 秒才看到错误。
+  static bool _isThrottleWindow(int status, String body) =>
+      status == 400 && body.trim().isEmpty;
+
   static String _normalizedBase(String baseUrl) {
     var base = baseUrl.trim();
     while (base.endsWith('/')) {
