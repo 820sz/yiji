@@ -1,6 +1,4 @@
 import 'dart:convert';
-import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -9,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/settings_store.dart';
 import 'package:yiji/core/day.dart';
-import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/goals.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
@@ -27,7 +24,6 @@ void main() {
   late FakeStore store;
   late AppState state;
   late _RecordingAi ai;
-  late Directory tempDir;
 
   final today = todayKey();
 
@@ -433,19 +429,6 @@ void main() {
 ///
 /// 别的测试只关心回什么,这一组关心的是**发出去的东西**——
 /// 会话隔离的 bug 正是发错了内容,不记下来就测不到。
-/// 最小合法 PNG(1×1 透明)。用来当"用户选好的头像"。
-const _tinyPng = <int>[
-  0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, //
-  0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52,
-  0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
-  0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4,
-  0x89, 0x00, 0x00, 0x00, 0x0A, 0x49, 0x44, 0x41,
-  0x54, 0x78, 0x9C, 0x63, 0x00, 0x01, 0x00, 0x00,
-  0x05, 0x00, 0x01, 0x0D, 0x0A, 0x2D, 0xB4, 0x00,
-  0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE,
-  0x42, 0x60, 0x82,
-];
-
 class _RecordingAi extends http.BaseClient {
   _RecordingAi({this.reply = '好的。'});
 

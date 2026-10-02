@@ -38,10 +38,9 @@ class TodayScreen extends StatefulWidget {
 class _TodayScreenState extends State<TodayScreen> {
   TaskSort _sort = TaskSort.custom;
 
-  /// 排序模式:长按任意一条进来,右侧出现拖拽把手。
-  ///
-  /// 只在自定义排序下有意义——按别的字段排的时候拖拽的结果会被重新排掉。
-  bool _reordering = false;
+  /// 拖动排序不是独立的模式:长按进入多选,在多选里继续按住就能拖
+  /// (见 `reorderable`)。它依赖"自定义"排序——按别的字段排的时候,
+  /// 拖出来的顺序会被立刻重排掉。
 
   /// 拖拽结束后把新顺序落库。
   ///
@@ -105,8 +104,14 @@ class _TodayScreenState extends State<TodayScreen> {
     final ordered = _sorted(tasks);
     final unfinished = ordered.where((t) => !t.done).toList();
     final finished = ordered.where((t) => t.done).toList();
-    // 排序模式:两段各自可拖拽。分界夹在中间,所以分开渲染两个列表。
-    final reorderable = _reordering && _sort == TaskSort.custom;
+    // 拖动排序在多选状态里可用。
+    //
+    // 用户明确要求不要一个单独的"排序模式":"我说的是长按住任务项,就有选中的
+    // 逻辑(包含现有的功能上,支持拖住排序),而不是现在把拖住单独分出一个功能"。
+    // 所以长按先选中,选中的状态下继续按住就能拖。
+    //
+    // 拖动只在"自定义"排序下有意义:别的排序方式会把拖出来的顺序立刻重排掉。
+    final reorderable = selecting && _sort == TaskSort.custom;
 
     return Column(
       children: [
@@ -121,17 +126,10 @@ class _TodayScreenState extends State<TodayScreen> {
           onShift: state.shiftDay,
           onToday: state.goToToday,
           onCycleSort: () => setState(() => _sort = _sort.next),
-          onToggleReorder: () => setState(() {
-            // 进入排序模式时自动切到"自定义":别的排序方式会把拖出来的
-            // 顺序立刻重排掉,那样拖了等于没拖。
-            if (!_reordering) _sort = TaskSort.custom;
-            _reordering = !_reordering;
-            if (_reordering) state.clearSelection();
-          }),
-          onCancelSelect: () {
-            setState(() => _reordering = false);
-            state.clearSelection();
-          },
+          // 排序方式切到"自定义"是拖动的先决条件,所以给一个显式入口;
+          // 它不再是一个模式开关。
+          onToggleReorder: () => setState(() => _sort = TaskSort.custom),
+          onCancelSelect: state.clearSelection,
           onOpenDay: () => showDayEditor(context, state.currentDay),
         ),
         Expanded(
@@ -191,8 +189,10 @@ class _TodayScreenState extends State<TodayScreen> {
                   bottom: 0,
                   child: _SelectionBar(
                     reordering: reorderable,
+                    // 拖动排序不再是单独的模式,但它依赖"自定义"排序;
+                    // 别的排序方式会把拖出来的顺序立刻重排掉。
                     onToggleReorder: () =>
-                        setState(() => _reordering = !_reordering),
+                        setState(() => _sort = TaskSort.custom),
                     onColor: () async {
                       final color = await showColorPicker(context);
                       if (color != null) await state.setSelectedColor(color);
@@ -347,10 +347,16 @@ class _TaskRow extends StatelessWidget {
         return false;
       },
       child: _DragToReorder(
-        // 只在排序模式下让长按变成拖动:平时长按是"进入多选"(既有行为,
-        // 用户已经习惯),两个长按只能留一个。排序模式下整张卡片按住就能拖,
-        // 不用去够右边那个小把手。
-        enabled: !selecting && reorderable,
+        // 长按分两步走,和手机上的习惯一致:
+        //   长按 → 进入多选(选中这条);在多选里继续按住 → 把它拖起来排序。
+        //
+        // 以前把拖动单独做成表头上一个「调整顺序」模式,用户明确说不要:
+        // "我说的是长按住任务项,就有选中的逻辑(包含现有的功能上,支持拖住排序),
+        // 而不是现在把拖住单独分出一个功能"。
+        //
+        // ReorderableDelayedDragStartListener 只在多选里出现,所以它和
+        // TaskCard 自己的"长按进多选"不会同时生效(多选中 onLongPress 已经置空)。
+        enabled: selecting,
         index: index,
         child: TaskCard(
           task: task,
@@ -358,29 +364,15 @@ class _TaskRow extends StatelessWidget {
           selected: selected,
           selecting: selecting,
           justAdded: justAdded,
-          reordering: reorderable,
+          reordering: selecting,
           onToggleSelect: () => state.toggleSelection(task.id),
           onTap: selecting
               ? () => state.toggleSelection(task.id)
               : () => showTaskEditor(context, task: task, day: day),
           onToggleDone: selecting ? null : () => state.toggleTaskOn(day, task),
-          // 长按进多选。排序模式下长按被拖动接管(见上面的 _DragToReorder),
-          // 所以那时不接这个回调,免得两个手势抢。
-          onLongPress: selecting
-              ? () => state.toggleSelection(task.id)
-              : (reorderable ? null : () => state.toggleSelection(task.id)),
-          dragHandle: reorderable
-              ? ReorderableDragStartListener(
-                  index: index,
-                  child: Icon(
-                    Icons.drag_handle,
-                    size: 22,
-                    color: dark
-                        ? AppTheme.darkTextSecondary
-                        : AppTheme.lightTextSecondary,
-                  ),
-                )
-              : null,
+          // 长按进多选。多选中再长按交给拖动识别器,这里不再接。
+          onLongPress:
+              selecting ? null : () => state.toggleSelection(task.id),
         ),
       ),
     );
@@ -561,13 +553,16 @@ class _Header extends StatelessWidget {
                   ),
                 ),
                 child: Text(
+                  // 选中数量始终要在:拖动只是多出来的能力,不该把"选了几条"
+                  // 这条信息挤掉。排序方式不是"自定义"时拖动无效,那种情况
+                  // 就别提示能拖,免得用户拖了半天没反应。
                   reordering
-                      ? '按住任意一条拖动排序'
+                      ? '已选择 $selectedCount 项 · 按住可拖动排序'
                       : '已选择 $selectedCount 项',
                   key: ValueKey('$reordering-$selectedCount'),
                   textAlign: TextAlign.center,
                   style: TextStyle(
-                    fontSize: reordering ? 15 : 17,
+                    fontSize: reordering ? 14 : 17,
                     fontWeight: FontWeight.w600,
                     color: textPrimary,
                   ),

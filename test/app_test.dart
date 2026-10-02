@@ -163,7 +163,8 @@ void main() {
       await tester.longPress(find.text('待办甲'));
       await tester.pumpAndSettle();
 
-      expect(find.text('已选择 1 项'), findsOneWidget);
+      // 选中数量始终在(拖动提示是附加信息,不挤掉它)。
+      expect(find.textContaining('已选择 1 项'), findsOneWidget);
       expect(find.text('颜色'), findsOneWidget);
       expect(find.text('删除'), findsOneWidget);
     });
@@ -612,26 +613,32 @@ void main() {
       expect(back.single.text, '待办甲');
     });
 
-    testWidgets('长按进多选(排序模式下才让位给拖动)', (tester) async {
+    testWidgets('长按进多选,拖住就排序', (tester) async {
+      // 用户明确要求不要把拖动做成单独的功能:
+      // "我说的是长按住任务项,就有选中的逻辑(包含现有的功能上,支持拖住排序),
+      // 而不是现在把拖住单独分出一个功能"。
       store.seedTask(today, '待办甲');
       await pumpApp(tester);
 
       await tester.longPress(find.text('待办甲'));
       await tester.pumpAndSettle();
-      expect(find.text('已选择 1 项'), findsOneWidget);
+      // 选中数量必须始终在:拖动只是多出来的能力,不该把"选了几条"挤掉。
+      expect(find.textContaining('已选择 1 项'), findsOneWidget);
+      expect(find.textContaining('按住可拖动排序'), findsOneWidget);
     });
 
-    testWidgets('排序模式里整张卡片按住就能拖', (tester) async {
-      // 进去之后长按不再进多选,而是把这条拖起来。
+    testWidgets('选中之后继续按住就能拖', (tester) async {
+      // 同一条：拖动不再需要先点表头的「调整顺序」，而是在选中态里直接按住拖。
       store.seedTask(today, '待办甲');
       store.seedTask(today, '待办乙');
       await pumpApp(tester);
 
-      await tester.tap(find.byTooltip('调整顺序'));
+      // 长按其中一条进入多选（也就是选中它）。
+      await tester.longPress(find.text('待办乙'));
       await tester.pumpAndSettle();
-      expect(find.text('按住任意一条拖动排序'), findsOneWidget);
+      expect(find.textContaining('已选择 1 项'), findsOneWidget);
 
-      // 拖第二条到第一条的位置。
+      // 选中态下整张卡片按住就能拖。
       //
       // ReorderableDelayedDragStartListener 要等长按超时才认(约 500ms),
       // 按下的时间不够就只是一次普通轻触,不会触发拖动。
@@ -651,7 +658,7 @@ void main() {
       expect(
         ordered.first.text,
         '待办乙',
-        reason: '拖到前面之后,顺序应该落库;实际顺序 ${ordered.map((t) => t.text).toList()}',
+        reason: '拖到前面之后顺序应该落库;实际 ${ordered.map((t) => t.text).toList()}',
       );
     });
   });
