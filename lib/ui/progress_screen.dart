@@ -161,6 +161,10 @@ class ProgressScreen extends StatelessWidget {
     // 先建目标再记进度:新建的那些要把这次已完成的量一并记进去。
     final created = await state.confirmNewGoals(accepted.newGoals);
     final applied = await state.confirmSuggestions(accepted.matches);
+    // 用户看过并确认过这一批了,角标就该掉——**包括他一条都没勾的那些**:
+    // 「取快递」这类匹配不上推进条的事,处理结果就是"没有结果"。
+    // 只算勾选的,角标会永远挂着(用户报的就是这个)。
+    await state.markReviewedSuggestionsSynced();
     if (!context.mounted) return;
     final parts = [
       if (applied > 0) '推进了 $applied 项',

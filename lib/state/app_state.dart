@@ -187,6 +187,9 @@ class AppState extends ChangeNotifier {
   /// 首次进页面时把要用的数据读出来。
   Future<void> bootstrap() async {
     await _loadDay();
+    // 待同步角标要在启动时就算出来。以前它只在增删改之后刷新,
+    // 于是**打开 app 时那个数字永远是 0**,直到用户碰一下任务才出现。
+    await _refreshPendingSync();
     // 必须走 loadConversations 而不是 _loadChat:前者会把会话列表也读出来,
     // 并挑一个有效的当前会话。只读消息的话,重开 app 后侧边栏是空的、
     // 历史对话也像是丢了。
@@ -307,6 +310,9 @@ class AppState extends ChangeNotifier {
     _weekDraft = '';
     _clearSelection();
     await _loadDay();
+    // 待同步计数是"当前这一周"的,换天可能跨周,必须跟着重算。
+    // 以前只在增删改之后刷新,于是切到另一周时角标还是上一周的数字。
+    await _refreshPendingSync();
   }
 
   Future<void> shiftDay(int delta) => goToDay(addDays(_currentDay, delta));
@@ -698,8 +704,10 @@ class AppState extends ChangeNotifier {
       if (tasks.isEmpty) {
         _suggestions = const [];
         _newGoalSuggestions = const [];
+        _readTaskIds = const [];
         return 0;
       }
+      _readTaskIds = [for (final task in tasks) task.id];
       final result = await _matcher.match(
         config: aiConfig,
         goals: activeGoals,
@@ -713,6 +721,13 @@ class AppState extends ChangeNotifier {
       notifyListeners();
     }
   }
+
+  /// 上一次让 AI 读过的那批待办 id。
+  ///
+  /// 确认阶段要把它们标成"处理过了",角标才会掉。**不管用户勾了几条**都要标:
+  /// 「取快递」这类永远匹配不上推进条的事,处理结果就是"没有结果"——
+  /// 那也算处理过了,否则它永远留在待同步计数里,角标怎么都清不掉。
+  List<int> _readTaskIds = const [];
 
   /// 把用户确认过的建议落库。
   Future<int> confirmSuggestions(List<ProgressSuggestion> accepted) async {
@@ -733,8 +748,43 @@ class AppState extends ChangeNotifier {
       }
     }
     _suggestions = const [];
+    await _markReadTasksSynced([
+      for (final suggestion in accepted) suggestion.taskId,
+    ]);
     await refreshGoals();
     return accepted.length;
+  }
+
+  /// 把用户**看过并确认过**的这一批都标成已处理,并刷新角标。
+  ///
+  /// 由界面在审阅面板确认后调用一次——**不管用户勾了几条**。
+  /// 「取快递」这类永远匹配不上推进条的事,处理结果就是"没有结果",
+  /// 那同样算处理过了;只把勾选的算进去的话,角标会永远挂着,
+  /// 而那正是用户报的问题("用 ai 整理了后还是有")。
+  Future<void> markReviewedSuggestionsSynced() async {
+    final ids = {
+      ..._readTaskIds,
+      for (final suggestion in _suggestions) suggestion.taskId,
+      for (final suggestion in _newGoalSuggestions) suggestion.taskId,
+    };
+    _readTaskIds = const [];
+    _suggestions = const [];
+    _newGoalSuggestions = const [];
+    if (ids.isNotEmpty) await _store.markTasksSynced(ids);
+    await _refreshPendingSync();
+  }
+
+  /// 把这批被读过的待办标成已处理,并刷新角标。
+  ///
+  /// 传入本次审阅涉及到的任务 id(建议里带的那些)。之所以不依赖
+  /// [requestProgressSuggestions] 记下的那份 id:用户可能在别的入口
+  /// 直接确认,或者中途切了周,那份 id 会对不上,而**角标清不掉正是
+  /// 用户报的问题**,不能让它依赖一个容易失效的中间状态。
+  Future<void> _markReadTasksSynced(Iterable<int> taskIds) async {
+    final ids = {..._readTaskIds, ...taskIds}.toList();
+    _readTaskIds = const [];
+    if (ids.isNotEmpty) await _store.markTasksSynced(ids);
+    await _refreshPendingSync();
   }
 
   /// 把用户勾选的"建议新建的目标"建出来,并把这次已完成的推进量一并记上。
@@ -764,6 +814,9 @@ class AppState extends ChangeNotifier {
       );
     }
     _newGoalSuggestions = const [];
+    await _markReadTasksSynced([
+      for (final suggestion in accepted) suggestion.taskId,
+    ]);
     await refreshGoals();
     return accepted.length;
   }

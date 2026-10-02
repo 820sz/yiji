@@ -18,7 +18,7 @@ class AppDatabase {
   /// v2 及以前所有消息混在一条历史里,新开的对话也能"看到"以前聊过的内容,
   /// 表现出来就是 AI 无中生有地提起你从没在这个对话里说过的事。
   /// v3 给消息加上会话归属,并把 `goals.target` 改成可空(推进条可以不预设目标值)。
-  static const _version = 4;
+  static const _version = 5;
 
   /// 打开(必要时创建或升级)数据库。
   ///
@@ -51,7 +51,8 @@ class AppDatabase {
         sort_order INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         color TEXT NOT NULL DEFAULT 'blue',
-        outcome TEXT NOT NULL DEFAULT ''
+        outcome TEXT NOT NULL DEFAULT '',
+        synced_at INTEGER
       )
     ''');
     // 按天查列表、按区间查周报,都走这个索引。
@@ -246,6 +247,15 @@ class AppDatabase {
       await db.execute("ALTER TABLE tasks ADD COLUMN outcome TEXT NOT NULL DEFAULT ''");
       // v4:每条会话有自己的头像。以前头像挂在全局设置上,换个对话还是同一张脸。
       await db.execute("ALTER TABLE conversations ADD COLUMN avatar TEXT NOT NULL DEFAULT ''");
+    }
+    if (from < 5) {
+      // v5:记下"这条做完的事已经被 AI 读过并处理过了"。
+      //
+      // 进度页右上角那个待同步角标,以前是"本周做完的事里没有进度记录的条数"。
+      // 这个定义有个必然的漏洞:像「取快递」这种永远不会匹配上任何推进条的事,
+      // 会永远留在计数里——用户整理完、确认完,角标还是挂着,怎么都清不掉。
+      // 现在改成"还没被处理过的条数",处理过就打上时间戳。
+      await db.execute('ALTER TABLE tasks ADD COLUMN synced_at INTEGER');
     }
   }
 

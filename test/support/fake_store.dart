@@ -592,17 +592,28 @@ class FakeStore implements RecordStore {
     return _entries.where((e) => e.taskId != null).map((e) => e.taskId!).toSet();
   }
 
+  /// 已经被 AI 处理过的待办 id。
+  ///
+  /// 和生产实现保持一致:判定用"处理过没有",而不是"有没有进度记录"。
+  /// 按后者算的话,「取快递」这种永远匹配不上推进条的事会永远留在
+  /// 待同步计数里,角标清不掉——那正是用户报的问题。
+  final Set<int> _synced = {};
+
   @override
   Future<List<Task>> unprocessedDoneTasks(String startDay, String endDay) async {
-    final processed = await tasksWithProgress();
     return _tasks
         .where(
           (t) =>
               t.done &&
-              !processed.contains(t.id) &&
+              !_synced.contains(t.id) &&
               t.day.compareTo(startDay) >= 0 &&
               t.day.compareTo(endDay) <= 0,
         )
         .toList();
+  }
+
+  @override
+  Future<void> markTasksSynced(Iterable<int> taskIds) async {
+    _synced.addAll(taskIds);
   }
 }

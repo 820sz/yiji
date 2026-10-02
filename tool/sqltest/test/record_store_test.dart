@@ -638,15 +638,11 @@ void main() {
   });
 
   group('未同步的已完成待办', () {
-    test('只挑出已完成、且还没计入过进度的', () async {
-      final goalId = await store.addGoal(
-        title: '小说推进',
-        unit: '字',
-        target: 10000,
-        period: GoalPeriod.weekly,
-        direction: GoalDirection.increase,
-        color: TaskColor.blue,
-      );
+    test('只挑出已完成、且还没被处理过的', () async {
+      // v5 之后判定标准换了:以前是"有没有进度记录",现在是"处理过没有"。
+      // 换成后者是因为前者有个必然的漏洞——「下午 健身」这类匹配不上任何
+      // 推进条的事永远没有进度记录,于是永远留在待同步计数里,
+      // 角标怎么都清不掉(用户报的正是这个)。
       final doneId = await store.addTask('2026-09-14', '上午 码字2k');
       await store.setTaskDone(doneId, true);
       await store.addTask('2026-09-14', '下午 健身');
@@ -654,16 +650,8 @@ void main() {
       var pending = await store.unprocessedDoneTasks('2026-09-14', '2026-09-20');
       expect(pending.map((t) => t.text), ['上午 码字2k']);
 
-      // 计入之后就不该再出现在待同步列表里。
-      await store.addProgress(
-        goalId: goalId,
-        amount: 2000,
-        day: '2026-09-14',
-        note: '上午 码字2k',
-        taskId: doneId,
-        source: 'ai',
-      );
-
+      // 处理过之后就不该再出现在待同步列表里——**即使一条进度都没记**。
+      await store.markTasksSynced([doneId]);
       pending = await store.unprocessedDoneTasks('2026-09-14', '2026-09-20');
       expect(pending, isEmpty);
     });
@@ -1111,6 +1099,155 @@ void main() {
 
       await migrated.setConversationAvatar(conversations.single.id, 'data:image/png;base64,AAA');
       expect((await migrated.conversations()).single.avatar, 'data:image/png;base64,AAA');
+    });
+  });
+
+  group('v4 升级到 v5 不丢数据', () {
+    /// v5 给 tasks 加了 synced_at(这条做完的事被 AI 读过没有)。
+    ///
+    /// 加它的原因是角标清不掉:以前待同步计数数的是"没有进度记录的条数",
+    /// 而「取快递」这种永远匹配不上推进条的事会永远留在里面。
+    ///
+    /// 对老库有一个必须成立的约定:**升级前就存在的老任务一律算"没同步过"**
+    /// (synced_at 为 NULL)。不能假装它们处理过——那会让用户第一次打开新版时
+    /// 该看到的待办凭空消失。
+    test('老任务都在,且都算作还没同步过', () async {
+      final dir = await Directory.systemTemp.createTemp('yiji_v4_to_v5');
+      final path = p.join(dir.path, 'yiji.db');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // 第一步:按 v4 的结构建库(有 outcome,但**没有** synced_at)。
+      final old = await databaseFactory.openDatabase(path);
+      await old.execute('''
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL, text TEXT NOT NULL,
+          done INTEGER NOT NULL DEFAULT 0, completed_at INTEGER,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+          color TEXT NOT NULL DEFAULT 'blue', outcome TEXT NOT NULL DEFAULT ''
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE journals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL UNIQUE,
+          text TEXT NOT NULL, updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE conversations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '',
+          avatar TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL,
+          role TEXT NOT NULL, content TEXT NOT NULL,
+          reasoning TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE goals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+          unit TEXT NOT NULL DEFAULT '', target REAL, period TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'increase',
+          color TEXT NOT NULL DEFAULT 'blue', active INTEGER NOT NULL DEFAULT 1,
+          start_day TEXT, end_day TEXT, created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE progress_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          goal_id INTEGER NOT NULL, amount REAL NOT NULL, day TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', task_id INTEGER,
+          source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE reminders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL, day TEXT NOT NULL, at TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+
+      await old.insert('tasks', {
+        'day': '2026-09-25',
+        'text': 'v4 时代做完的事',
+        'done': 1,
+        'sort_order': 1,
+        'created_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+        'color': 'green',
+        'outcome': 'fell',
+      });
+      await old.setVersion(4);
+      await old.close();
+
+      // 第二步:用生产的打开方式升级。
+      final upgraded = await AppDatabase.open(path: path);
+      addTearDown(upgraded.close);
+      final migrated = SqliteRecordStore(upgraded.db);
+
+      final tasks = await migrated.tasksOfDay('2026-09-25');
+      expect(tasks.single.text, 'v4 时代做完的事');
+      // 老数据里"没做好"这个评价要留着,升级不该把它抹掉。
+      expect(tasks.single.outcome, TaskOutcome.fell);
+
+      // 关键:老任务算"还没同步过",用户升级后能看到它等待处理。
+      final pending = await migrated.unprocessedDoneTasks('2026-09-20', '2026-09-26');
+      expect(pending.single.id, tasks.single.id);
+
+      // 标记之后就从待办里消失。
+      await migrated.markTasksSynced([tasks.single.id]);
+      expect(
+        await migrated.unprocessedDoneTasks('2026-09-20', '2026-09-26'),
+        isEmpty,
+      );
+      // 而且任务本身还在(只是不再计数)。
+      expect((await migrated.tasksOfDay('2026-09-25')).single.text, 'v4 时代做完的事');
+    });
+  });
+
+  group('待同步计数', () {
+    test('没有进度记录的事,标记后也不再计入', () async {
+      // 「取快递」永远匹配不上推进条,所以它永远没有进度记录。
+      // 按"有没有进度记录"算的话它会永远留在计数里——角标清不掉就是这么来的。
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      final id = await store.addTask('2026-09-25', '取快递');
+      await store.setTaskDone(id, true);
+
+      expect(await store.unprocessedDoneTasks('2026-09-20', '2026-09-26'), hasLength(1));
+      expect(await store.tasksWithProgress(), isEmpty, reason: '它本来就没有进度记录');
+
+      await store.markTasksSynced([id]);
+      expect(
+        await store.unprocessedDoneTasks('2026-09-20', '2026-09-26'),
+        isEmpty,
+        reason: '处理过就该从待同步里消失,哪怕一条进度都没记',
+      );
+    });
+
+    test('没做完的事不计入', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      await store.addTask('2026-09-25', '还没做的事');
+      expect(await store.unprocessedDoneTasks('2026-09-20', '2026-09-26'), isEmpty);
+    });
+
+    test('区间外的不计入', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      final id = await store.addTask('2026-09-01', '上个月做完的');
+      await store.setTaskDone(id, true);
+      expect(await store.unprocessedDoneTasks('2026-09-20', '2026-09-26'), isEmpty);
     });
   });
 }

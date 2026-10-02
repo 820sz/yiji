@@ -561,11 +561,23 @@ class SqliteRecordStore implements RecordStore {
     final rows = await _db.rawQuery(
       'SELECT t.* FROM tasks t '
       'WHERE t.day >= ? AND t.day <= ? AND t.done = 1 '
-      'AND NOT EXISTS (SELECT 1 FROM progress_entries p WHERE p.task_id = t.id) '
+      'AND t.synced_at IS NULL '
       'ORDER BY t.day ASC',
       [startDay, endDay],
     );
     return rows.map(Task.fromMap).toList();
+  }
+
+  @override
+  Future<void> markTasksSynced(Iterable<int> taskIds) async {
+    final ids = taskIds.toList();
+    if (ids.isEmpty) return;
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final placeholders = List.filled(ids.length, '?').join(',');
+    await _db.rawUpdate(
+      'UPDATE tasks SET synced_at = ? WHERE id IN ($placeholders)',
+      [now, ...ids],
+    );
   }
 
   static Future<int> _maxSortOrder(String day, DatabaseExecutor exec) async {

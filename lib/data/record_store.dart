@@ -173,8 +173,18 @@ abstract class RecordStore {
   /// 用来判断"哪些已完成的待办还没同步过",避免同一条被重复计入。
   Future<Set<int>> tasksWithProgress();
 
-  /// 区间内已完成、但还没同步过进度的待办。
+  /// 区间内已完成、但**还没被 AI 读过**的待办。
+  ///
+  /// 判定用 `tasks.synced_at` 而不是"有没有进度记录":像「取快递」这种
+  /// 永远匹配不上任何推进条的事,按后者算会永远留在待同步计数里——
+  /// 用户整理完、确认完,角标照样挂着,怎么都清不掉。
   Future<List<Task>> unprocessedDoneTasks(String startDay, String endDay);
+
+  /// 把这几条标记成"已经处理过了"。
+  ///
+  /// 用户在审阅面板点完确认(哪怕一条都没勾)就该调用:没有匹配结果也是一种
+  /// 处理结果,它同样要能清掉角标。
+  Future<void> markTasksSynced(Iterable<int> taskIds);
 }
 
 /// 某一天的待办计数。日历打点只需要这两个数。
