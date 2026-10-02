@@ -58,7 +58,14 @@ MemeDirective stripMemeDirective(String raw) {
   );
 }
 
-/// 解析 `表情: 开心 | 比心` 里的内容。
+/// 解析 `表情: <描述>` 里的内容。
+///
+/// **主格式是整条描述原文**:提示词把可选图片的清单摆给模型,要求它原样抄
+/// 一行回来,所以方括号里就是一个 caption,里面通常没有竖线。
+/// 抄回来的字要和库里的 caption 逐字比对(归一化后),多一个字都可能配不上图。
+///
+/// 同时兼容老的 `情绪 | 画面描述` 写法:那种拿不到精确匹配,只能退回
+/// "情绪 + 关键词"检索,至少还能发一张同情绪的。
 MemeDirective _parseInner(String inner) {
   // 去掉开头的"表情"两个字和紧随的分隔符。
   var body = inner;
@@ -68,11 +75,21 @@ MemeDirective _parseInner(String inner) {
   } else if (body.startsWith('表情')) {
     body = body.substring(2);
   }
+  body = body.trim();
 
-  final parts = body.split('|');
-  final emotion = parts.first.trim();
-  final query = parts.length > 1 ? parts.sublist(1).join('|').trim() : '';
-  return MemeDirective(text: '', emotion: emotion, query: query);
+  // 老格式:`情绪 | 描述`。只在竖线两侧都像"短情绪词"时才这么理解,
+  // 免得把描述里本来就有的竖线当成分隔符。
+  final bar = body.indexOf('|');
+  if (bar > 0) {
+    final emotion = body.substring(0, bar).trim();
+    final query = body.substring(bar + 1).trim();
+    // 情绪词很短(几个字),描述通常更长;两侧都非空才算老格式。
+    if (emotion.isNotEmpty && query.isNotEmpty && emotion.length <= 6) {
+      return MemeDirective(text: '', emotion: emotion, query: query);
+    }
+  }
+
+  return MemeDirective(text: '', emotion: body, query: '');
 }
 
 /// 已经从库里挑好了图,把它写进消息正文。

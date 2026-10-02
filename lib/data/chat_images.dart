@@ -194,6 +194,66 @@ class MemeLibrary {
     }
     return pool[seed.abs() % pool.length];
   }
+
+  /// 按**模型抄回来的描述**挑图。
+  ///
+  /// 这是挑图的主路径,学的是 dsh-meme 的做法:提示词里把每张图的描述列给模型,
+  /// 要求它**原样抄一条**回来,这里再拿抄回来的字符串去精确定位那张图。
+  ///
+  /// 为什么不继续用"模型自己编一个画面描述,再拿描述去搜":
+  /// 模型的描述是自由发挥的,和库里预写的 caption 几乎不会逐字相同;
+  /// 它写"超爽蹦起来",库里是"抱着抱枕打滚笑",搜索命中不了、只能退回随机抽,
+  /// 于是用户看到的就是"AI 发的图跟说的话对不上"或者干脆发不出来。
+  /// 抄描述这条路把"挑图"变成了**闭集选择**,选错也只会选到库里的另一张,
+  /// 不会出现配不上图的情况。
+  ///
+  /// 匹配顺序:整条描述精确相等 → 描述互相包含 → 关键词打分。
+  Meme? pickByCaption(String caption, {String? tag, int seed = 0}) {
+    if (memes.isEmpty) return null;
+    final wanted = _normalize(caption);
+    if (wanted.isEmpty) return null;
+
+    final pool = tag == null || tag.isEmpty ? memes : byTag(tag);
+    final searchIn = pool.isEmpty ? memes : pool;
+
+    for (final meme in searchIn) {
+      if (_normalize(meme.caption) == wanted) return meme;
+    }
+    for (final meme in searchIn) {
+      final shown = _normalize(meme.caption);
+      if (shown.isEmpty) continue;
+      if (shown.contains(wanted) || wanted.contains(shown)) return meme;
+    }
+    // 都没对上就按关键词打分,最后还是不行才随机——宁可给一张同情绪的,
+    // 也不要什么都不发(用户已经看到 AI 说"这个给你")。
+    final picked = pick(tag: tag, query: caption, seed: seed);
+    return picked;
+  }
+
+  /// 比较用:去掉空白与标点、统一大小写。模型抄回来时可能少个逗号或加个句号。
+  static String _normalize(String text) => text
+      .toLowerCase()
+      .replaceAll(RegExp(r'[\s,、。.!?;:;:""''「」【】()()]'), '');
+
+  /// 生成给模型看的"可选图片清单"。
+  ///
+  /// 每行是 `情绪 | 描述`,描述就是挑图时要**原样抄回来**的那串字。
+  /// 只有把候选摆到模型面前,它才可能抄,而不是自己编一个画面描述。
+  ///
+  /// [perTag] 控制每个情绪最多列几张:全列出来要上千 token,而这个清单
+  /// 每次请求都要带,长期下来不划算。每个情绪给几张足够它挑出贴题的。
+  String catalogPrompt({int perTag = 6}) {
+    if (memes.isEmpty) return '';
+    final buffer = StringBuffer();
+    for (final tag in tags) {
+      final shown = byTag(tag).take(perTag).toList();
+      buffer.writeln('【$tag】');
+      for (final meme in shown) {
+        buffer.writeln('  ${meme.caption}');
+      }
+    }
+    return buffer.toString();
+  }
 }
 
 /// 把用户发的图片存到应用私有目录,并给出消息里引用的文件名。

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yiji/ai/prompts.dart';
 import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/meme_directive.dart';
 
@@ -123,6 +124,87 @@ void main() {
         isTrue,
         reason: '按关键词「$keyword」应该挑到含它的那张',
       );
+    });
+
+    test('给的清单里每一条都能原样定位回那张图', () async {
+      // 这条路是"AI 发的图和它说的话配得上"的保证:提示词把清单摆给模型,
+      // 模型抄一条回来,这里必须能精确找到那一张。清单里任何一条对不上,
+      // 用户看到的就是随机一张图。
+      final library = await MemeLibrary.load();
+      expect(library.memes, isNotEmpty);
+
+      for (final meme in library.memes) {
+        final picked = library.pickByCaption(meme.caption);
+        expect(
+          picked?.file,
+          meme.file,
+          reason: '描述「${meme.caption}」应当定位回 ${meme.file}',
+        );
+      }
+    });
+
+    test('抄描述时少个标点也能对上', () async {
+      // 模型抄写不保证标点完全一致,归一化之后要能容忍。
+      final library = await MemeLibrary.load();
+      final meme = library.memes.firstWhere((m) => m.caption.length > 6);
+      final sloppy = '${meme.caption.replaceAll('，', '')}。';
+      expect(library.pickByCaption(sloppy)?.file, meme.file);
+    });
+
+    test('清单不是空的,而且每个情绪都露了面', () async {
+      // 清单为空的话提示词里就没有可选内容,模型只能自己编——那就退回老问题了。
+      final library = await MemeLibrary.load();
+      final catalog = library.catalogPrompt();
+      expect(catalog.trim(), isNotEmpty);
+      for (final tag in library.tags) {
+        expect(catalog, contains('【$tag】'), reason: '清单里应当有「$tag」这一节');
+      }
+      // 每个情绪下至少列出一条真实描述。
+      final firstOfTag = library.byTag(library.tags.first).first.caption;
+      expect(catalog, contains(firstOfTag));
+    });
+
+    test('编出来的描述不会空手而归,至少给同情绪的', () async {
+      // 模型偶尔还是会自己编(尤其老对话里的历史指令)。这种时候宁愿给一张
+      // 同情绪的,也不要什么都不发——它已经跟用户说"这个给你"了。
+      final library = await MemeLibrary.load();
+      final picked = library.pickByCaption('完全没有的一句话啊哈哈', tag: 'happy');
+      expect(picked, isNotNull);
+    });
+
+    test('提示词里摆的清单和挑图用的是同一份描述', () async {
+      // 这条是"配得上图"的**闭环**:提示词给模型的清单必须来自同一批
+      // caption,挑图也必须拿同一批 caption 去比对。任何一边换了措辞
+      // (比如提示词里给编号、挑图时按关键词搜),闭环就断了,
+      // 用户看到的就是随机一张图。
+      final library = await MemeLibrary.load();
+      final catalog = library.catalogPrompt();
+      final hint = memeHintPrompt(catalog);
+
+      // 提示词里确实带着清单。
+      for (final meme in library.memes.take(3)) {
+        expect(hint, contains(meme.caption), reason: '清单应当包含「${meme.caption}」');
+      }
+      // 清单里出现的每一条描述,都能定位回一张图。
+      final lines = catalog
+          .split('\n')
+          .map((line) => line.trim())
+          .where((line) => line.isNotEmpty && !line.startsWith('【'))
+          .toList();
+      expect(lines, isNotEmpty);
+      for (final caption in lines) {
+        expect(
+          library.pickByCaption(caption),
+          isNotNull,
+          reason: '清单里这一行定位不到图:「$caption」',
+        );
+      }
+    });
+
+    test('图库为空时不给提示词,免得白占上下文', () {
+      // 没有素材却允许它发,模型会写一行永远挑不到图的指令。
+      expect(memeHintPrompt(''), isEmpty);
+      expect(memeHintPrompt('   '), isEmpty);
     });
   });
 

@@ -1159,8 +1159,13 @@ class AppState extends ChangeNotifier {
 
     // 表情包库非空时才把发图规则写进提示词:没有素材却允许它发,
     // 它就会写一行永远挑不到图的指令,还白占上下文。
+    //
+    // 提示词里带的是**可选的图片清单**(每行一张图的真实描述),模型必须
+    // 从里面原样抄一条——这是学 dsh-meme 的做法。让它自己编描述的话,
+    // 编出来的句子在库里找不到对应的图,搜索落空就只能随机抽,
+    // 用户看到的就成了"发的图跟说的话配不上"。
     final memes = await MemeLibrary.load();
-    final memeHint = memes.isEmpty ? '' : memeHintPrompt(memes.tags.join(' / '));
+    final memeHint = memes.isEmpty ? '' : memeHintPrompt(memes.catalogPrompt());
 
     final history = <AiMessage>[
       AiMessage.system(chatSystemPrompt(memeHint: memeHint)),
@@ -1284,16 +1289,35 @@ class AppState extends ChangeNotifier {
   }
 
   /// 按模型给的情绪和画面描述挑一张表情包。
+  /// 把模型抄回来的描述定位到具体一张图。
+  ///
+  /// 主路径是 [MemeLibrary.pickByCaption]:模型从提示词里那张清单中抄一条,
+  /// 这里按描述精确定位。**不再拿模型自己编的描述去搜**——编的句子和库里
+  /// 预写的 caption 对不上,搜索落空就只能随机抽,那就是"发出来的图跟说的话
+  /// 配不上"的根源。
+  ///
+  /// 兼容老格式:`[表情: 开心 | 蹦起来]` 这种带竖线的,描述部分拿不到精确匹配,
+  /// 就走"情绪 + 关键词"的老路,至少还能发一张同情绪的。
   Future<Meme?> _pickMeme(MemeDirective directive) async {
     final library = await MemeLibrary.load();
     if (library.isEmpty) return null;
+    final seed = directive.query.hashCode ^ directive.emotion.hashCode;
+
+    // 新格式:整条指令就是描述原文。
+    if (directive.emotion.isNotEmpty && directive.query.isEmpty) {
+      final byCaption = library.pickByCaption(directive.emotion, seed: seed);
+      if (byCaption != null) return byCaption;
+    }
+
+    // 老格式或精确匹配失败:退到情绪 + 关键词检索。
     final tag = library.tagForEmotion(directive.emotion);
-    // 用情绪+描述一起检索;同一个对话里同一句话应该挑到同一张,
-    // 所以拿整段指令当种子,而不是随机。
+    final fallbackText = '${directive.emotion} ${directive.query}'.trim();
+    final byQuery = library.pickByCaption(fallbackText, tag: tag, seed: seed);
+    if (byQuery != null) return byQuery;
     return library.pick(
       tag: tag,
-      query: '${directive.emotion} ${directive.query}'.trim(),
-      seed: directive.emotion.hashCode ^ directive.query.hashCode,
+      query: fallbackText,
+      seed: seed,
     );
   }
 
