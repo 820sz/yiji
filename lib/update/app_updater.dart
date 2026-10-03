@@ -1,4 +1,7 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
 
@@ -21,7 +24,20 @@ import 'package:http/http.dart' as http;
 const kGithubMirrors = <String>[
   'https://gh-proxy.com/',
   'https://ghfast.top/',
+  'https://gh.llkk.cc/',
+  'https://gh.zwy.one/',
+  'https://ghproxy.cxkpro.top/',
 ];
+
+/// 一次下载的总预算。
+///
+/// **必须有一个**。没有它,卡住就是永远卡住——用户看到的是一条停在 0% 的
+/// 进度条,既不会失败也不会成功。有了它,最坏情况是几分钟后给一句能照做的提示。
+///
+/// 取 5 分钟:实测 62MB 的包在这条网络上跑完要 119 秒,120 秒的预算刚好卡在
+/// 边界上、把一次成功的下载掐掉了(真踩到)。预算是"防死等"的兜底,不是速度
+/// 指标,留够余量比掐得准重要。
+const _totalBudget = Duration(minutes: 5);
 
 /// 一次可安装的更新。
 class UpdateInfo {
@@ -175,6 +191,233 @@ class AppUpdater {
     void Function(int received, int total)? onBytes,
     int maxAttempts = 6,
   }) async {
+    final sink = BytesBuilder(copy: false);
+    await _fetch(
+      info,
+      onProgress: onProgress,
+      onBytes: onBytes,
+      maxAttempts: maxAttempts,
+      onChunk: sink.add,
+    );
+    return sink.takeBytes();
+  }
+
+  /// **并发竞速 + 边收边写盘**的下载。返回落盘后的文件。
+  ///
+  /// 这三件事都是从同一个人另一个跑得好好的项目(AI上外语)抄来的做法,
+  /// 之前我一条都没做,所以更新一直下不动:
+  ///
+  /// 1. **边收边写盘**,不把整包读进内存。
+  ///    62MB 的包读进 `List<int>` 是 6500 万个元素,反复扩容拷贝把堆压死——
+  ///    表现是**不报错、不报进度、就停在 0%**。
+  /// 2. **所有候选同时下**,谁先成谁算数,其余的立刻取消。
+  ///    串行试错会卡死在"连上了但吐数据极慢"的那个源上——正是用户看到的画面。
+  /// 3. **总预算硬超时**。没有它,卡住就是永远卡住;有了它,至少会报错让你重试。
+  Future<File> downloadToFile(
+    UpdateInfo info,
+    File target, {
+    void Function(double progress)? onProgress,
+    void Function(int received, int total)? onBytes,
+  }) async {
+    final candidates = _candidates(info);
+    if (candidates.isEmpty) throw UpdateException('这个版本没有可用的下载地址');
+
+    // 给内部闭包用的名字,免得和参数重名看不清。
+    final onProgressCallback = onProgress;
+    final onBytesCallback = onBytes;
+
+    // 每个候选写自己的临时文件:并发时不能共用一个文件。
+    final tmp = <int, File>{};
+    final completed = Completer<File>();
+    var settled = false;
+
+    /// 已经收到的字节数(所有候选里的最大值)。界面直接用它显示
+    /// "12.3 MB / 62.3 MB"——用户靠这两个数字判断"还在动没有"。
+    var maxReceived = 0;
+
+    /// 主动切断这个候选的下载。
+    ///
+    /// 不切断的话,输掉的那几个候选**会继续把 62MB 下完**——真机上就是
+    /// 一次更新后目录里堆着几个 62MB 的残包,而且一直在偷占流量。
+    /// 这里把消费端断掉(`await for` 退出即取消订阅),连接随之关闭。
+    final cut = <int, Completer<void>>{};
+
+    /// 清掉所有临时文件。收尾统一走这里,免得漏。
+    Future<void> sweep() async {
+      for (final part in tmp.values) {
+        try {
+          if (part.existsSync()) await part.delete();
+        } catch (_) {
+          // 还有句柄在写(刚被切断、尚未完全停下):留给下一次调用覆盖,
+          // 不该因为清理失败就让整个更新失败。
+        }
+      }
+    }
+
+    Future<void> race(int index, String url) async {
+      final part = File('${target.path}.$index.part');
+      tmp[index] = part;
+      final abort = cut[index] = Completer<void>();
+      try {
+        if (part.existsSync()) part.deleteSync();
+        await _fetchOne(
+          url,
+          fallbackTotal: info.sizeBytes,
+          abort: abort,
+          onChunk: (chunk) {
+            // 赢家已经出现:立刻停手,不要再往盘上写。
+            if (settled) return;
+            part.writeAsBytesSync(chunk, mode: FileMode.append);
+          },
+          onBegin: () async {
+            if (part.existsSync()) part.deleteSync();
+          },
+          // **用真实字节数回报,不用比例。**
+          //
+          // 之前这里传的是 0..1 的比例,竞速层却当字节数收,两者量级差
+          // 六个数量级——界面上那行"12.3 MB / 62.3 MB"因此几乎不动,
+          // 看着就像卡死。走字节数这条最原始的信号,没有换算就没有差错。
+          onBytes: (received) {
+            if (settled) return;
+            // 报所有候选里最大的那个:用户看到的是最快那条的进展。
+            if (received > maxReceived) {
+              maxReceived = received;
+              onBytesCallback?.call(maxReceived, info.sizeBytes);
+              if (info.sizeBytes > 0) {
+                onProgressCallback?.call(
+                  (maxReceived / info.sizeBytes).clamp(0.0, 1.0),
+                );
+              }
+            }
+          },
+        );
+        if (settled) return;
+        // 竞速窗口内先校验,不合格的候选直接淘汰,让别的继续。
+        final problem = await _verify(part, info.sizeBytes);
+        if (problem != null) return;
+        // **先落 settled,再改名。**
+        // 顺序反了的话,别的候选会在改名这几毫秒里继续往同一个目录写,
+        // 收尾时就会出现"目录不是空的"删不掉(测试里真踩到了)。
+        settled = true;
+        for (final entry in cut.entries) {
+          if (entry.key != index && !entry.value.isCompleted) {
+            entry.value.complete();
+          }
+        }
+        if (await target.exists()) await target.delete();
+        await part.rename(target.path);
+        if (!completed.isCompleted) completed.complete(target);
+        await sweep();
+      } catch (_) {
+        // 单个候选失败或被切断:交给别的候选,总预算兜底。
+        try {
+          if (!settled && part.existsSync()) await part.delete();
+        } catch (_) {
+          // 句柄刚被切断时可能还删不掉,上面的 sweep 会再试。
+        }
+      }
+    }
+
+    for (var i = 0; i < candidates.length; i++) {
+      unawaited(race(i, candidates[i]));
+    }
+    onProgress?.call(0);
+    onBytes?.call(0, info.sizeBytes);
+
+    final result = await completed.future.timeout(
+      _totalBudget,
+      onTimeout: () async {
+        settled = true;
+        for (final abort in cut.values) {
+          if (!abort.isCompleted) abort.complete();
+        }
+        await sweep();
+        throw UpdateException(
+          '下载超时(${_totalBudget.inSeconds} 秒),直连和 ${kGithubMirrors.length} 个中转都试过了。'
+          '换 Wi-Fi 或流量再试,也可以在更新弹窗里点「用系统下载器」,'
+          '或者到 GitHub 的 releases 页面手动下载。',
+        );
+      },
+    );
+    onBytes?.call(info.sizeBytes, info.sizeBytes);
+    onProgress?.call(1);
+    return result;
+  }
+
+  /// 候选地址:直连在前(网络正常的人该走最快的那条),中转兜底,去重。
+  static List<String> _candidates(UpdateInfo info) {
+    final urls = <String>[
+      if (info.downloadUrl.isNotEmpty) info.downloadUrl,
+      if (info.apiDownloadUrl.isNotEmpty) info.apiDownloadUrl,
+      for (final mirror in kGithubMirrors)
+        if (info.downloadUrl.isNotEmpty) '$mirror${info.downloadUrl}',
+    ];
+    return <String>{
+      for (final url in urls)
+        if (url.isNotEmpty) url,
+    }.toList();
+  }
+
+  /// 校验落盘的文件:大小 + zip 魔数。返回 null 表示通过。
+  static Future<String?> _verify(File file, int expectedSize) async {
+    if (!file.existsSync()) return '文件不存在';
+    final length = await file.length();
+    if (length <= 0) return '文件为空';
+    if (expectedSize > 0 && length != expectedSize) {
+      return '字节数不符(期望 $expectedSize,实际 $length)';
+    }
+    if (length < 100 * 1024) {
+      return '只有 $length 字节,不像安装包(多半是网络的拦截页)';
+    }
+    final head = await file.openRead(0, 4).fold<List<int>>(
+          <int>[],
+          (acc, chunk) => acc..addAll(chunk),
+        );
+    if (head.length < 4 ||
+        head[0] != 0x50 ||
+        head[1] != 0x4B ||
+        head[2] != 0x03 ||
+        head[3] != 0x04) {
+      return '开头不是 zip 魔数(多半是网络的拦截页)';
+    }
+    return null;
+  }
+
+  /// 只做一次尝试的流式取包(竞速用,内部不再重试)。
+  ///
+  /// [abort] 完成时立刻退出读取:竞速里赢家已经出现,输掉的候选没必要把
+  /// 剩下的几十兆下完。
+  ///
+  /// [onBytes] 收的是**真实字节数**(不是 0..1 的比例):竞速层要拿它比
+  /// "谁下得多",比例没法比。
+  Future<void> _fetchOne(
+    String url, {
+    required int fallbackTotal,
+    required void Function(List<int> chunk) onChunk,
+    Future<void> Function()? onBegin,
+    void Function(int received)? onBytes,
+    Completer<void>? abort,
+  }) =>
+      _downloadOnce(
+        url,
+        fallbackTotal: fallbackTotal,
+        onChunk: onChunk,
+        onBegin: onBegin,
+        onBytes: (received, _) => onBytes?.call(received),
+        abort: abort,
+      );
+
+  /// 公共的取包流程:按候选地址依次尝试,并把校验做全。
+  ///
+  /// 校验放在这里而不是各自的调用点:内容校验(大小、魔数)漏一处就等于没做。
+  Future<void> _fetch(
+    UpdateInfo info, {
+    required void Function(List<int> chunk) onChunk,
+    Future<void> Function()? onBegin,
+    void Function(double progress)? onProgress,
+    void Function(int received, int total)? onBytes,
+    int maxAttempts = 6,
+  }) async {
     final urls = <String>{
       // 直连优先:网络通的人就该走最快的那条。
       if (info.downloadUrl.isNotEmpty) info.downloadUrl,
@@ -189,12 +432,15 @@ class AppUpdater {
     for (var attempt = 0; attempt < maxAttempts; attempt++) {
       final url = urls[attempt % urls.length];
       try {
-        return await _downloadOnce(
+        await _downloadOnce(
           url,
           fallbackTotal: info.sizeBytes,
           onProgress: onProgress,
           onBytes: onBytes,
+          onChunk: onChunk,
+          onBegin: onBegin,
         );
+        return;
       } on Exception catch (error) {
         lastError = error;
         // 退一步再试:立刻重连往往还是被同一个原因掐断。
@@ -208,11 +454,14 @@ class AppUpdater {
   }
 
   /// 单次流式下载。
-  Future<List<int>> _downloadOnce(
+  Future<void> _downloadOnce(
     String url, {
     required int fallbackTotal,
+    required void Function(List<int> chunk) onChunk,
+    Future<void> Function()? onBegin,
     void Function(double progress)? onProgress,
     void Function(int received, int total)? onBytes,
+    Completer<void>? abort,
   }) async {
     final http.StreamedResponse response;
     try {
@@ -228,7 +477,7 @@ class AppUpdater {
 
     // 服务端没给 Content-Length 时退回 release 里登记的大小,界面才有分母。
     final total = response.contentLength ?? fallbackTotal;
-    final bytes = <int>[];
+    await onBegin?.call();
     onProgress?.call(0);
     onBytes?.call(0, total);
 
@@ -242,14 +491,27 @@ class AppUpdater {
     final step = total > 0 && total < minStep
         ? (total / 4).ceil()
         : (percentStep > minStep ? percentStep : minStep);
+    var received = 0;
     var lastReported = 0;
 
-    void report(int received) {
+    // **只留开头这一小段**用于内容校验。
+    //
+    // 拿到前 4 字节就能判断是不是 zip;不保留整包,内存占用与包大小无关。
+    final head = <int>[];
+
+    void report() {
       lastReported = received;
       onBytes?.call(received, total);
       if (total > 0) {
         onProgress?.call((received / total).clamp(0.0, 1.0));
       }
+    }
+
+    // 被主动切断时从这里退出:`await for` 一退出就取消订阅、关掉连接,
+    // 不会把剩下的几十兆下完。
+    var aborted = false;
+    if (abort != null) {
+      unawaited(abort.future.then((_) => aborted = true));
     }
 
     try {
@@ -261,27 +523,36 @@ class AppUpdater {
           UpdateException('下载卡住了,对方不再发数据'),
         ),
       )) {
-        bytes.addAll(chunk);
-        if (bytes.length - lastReported < step) continue;
-        report(bytes.length);
+        if (aborted) return;
+        onChunk(chunk);
+        if (head.length < 4) {
+          head.addAll(chunk.take(4 - head.length));
+        }
+        received += chunk.length;
+        if (received - lastReported < step) continue;
+        report();
+        // 报完再查一次:切断可能正好发生在这一块的处理过程中。
+        if (aborted) return;
       }
     } on Exception catch (error) {
       // 读到一半断了:抛出去交给上层重试,这里不假装成功。
       // 先把已收到的字节报上去,界面上"下到一半断了"才看得出来。
-      report(bytes.length);
+      // 被切断不算"断了"——那是我们自己叫停的,不该报错吓人。
+      if (aborted) return;
+      report();
       throw UpdateException('下载中断:$error');
     }
 
-    if (total > 0 && bytes.length < total) {
-      throw UpdateException('下载不完整(${bytes.length}/$total 字节)');
+    if (total > 0 && received < total) {
+      throw UpdateException('下载不完整($received/$total 字节)');
     }
     // 明显太短的一定不对,直接当失败交给上层重试。
     //
     // 放在魔数检查之前:一张拦截页只有一两 KB,而真包装得下全世界也不会
     // 小于 100KB。先按大小挡一道,重试换地址往往就过去了。
-    if (bytes.length < 100 * 1024) {
+    if (received < 100 * 1024) {
       throw UpdateException(
-        '下载回来只有 ${bytes.length} 字节,不像安装包(多半是网络的拦截页)',
+        '下载回来只有 $received 字节,不像安装包(多半是网络的拦截页)',
       );
     }
     // **内容也要验,不能只看字节数。**
@@ -294,18 +565,15 @@ class AppUpdater {
     //
     // APK 就是个 zip,开头必须是 `PK\x03\x04`。这一步能把拦截页、301/302 的
     // 页面、以及各种"稍后再试"的提示页当场认出来,并给出能照做的提示。
-    if (!_looksLikeApk(bytes)) {
-      final head = _sniff(bytes);
+    if (!_looksLikeApk(head)) {
       throw UpdateException(
-        '下载到的不是安装包(收到 ${bytes.length} 字节,像是网页而不是 APK'
-        '${head.isEmpty ? '' : ':$head'})。'
+        '下载到的不是安装包(收到 $received 字节,开头不是 zip 魔数)。'
         '多半是当前网络的拦截页,换 Wi-Fi 或流量再试,'
         '也可以到 GitHub 的 releases 页面手动下载。',
       );
     }
-    onBytes?.call(bytes.length, total);
+    onBytes?.call(received, total);
     onProgress?.call(1);
-    return bytes;
   }
 
   /// 头几个字节是不是 zip 的魔数。
@@ -318,14 +586,6 @@ class AppUpdater {
         bytes[1] == 0x4B && // K
         bytes[2] == 0x03 &&
         bytes[3] == 0x04;
-  }
-
-  /// 从开头抠一小段可读文本,放进错误信息里,一眼看得出收到的是什么。
-  static String _sniff(List<int> bytes) {
-    final text = String.fromCharCodes(
-      bytes.take(120).where((b) => b >= 32 && b < 127),
-    );
-    return text.trim();
   }
 
   void dispose() => _http.close();

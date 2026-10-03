@@ -62,21 +62,27 @@ class ApkInstaller {
     if (await file.exists()) await file.delete();
 
     onProgress?.call(0);
-    final bytes = await updater.download(
+    // **边收边写盘**,不把 62MB 读进内存。
+    //
+    // 以前是 `download()` 拿到整个 List<int> 再落盘:62MB 的包 = 一个
+    // 6500 万元素的 list,反复扩容拷贝会把堆压死,表现是**不报错、不报进度、
+    // 就停在 0%**(用户在 v1.1.1 上实测到的就是这个)。
+    await updater.downloadToFile(
       info,
+      file,
       onProgress: onProgress,
       onBytes: onBytes,
     );
 
-    // 校验一次大小再落盘。下载中途断过的话,这里能挡住一个装不上的残包,
+    // 校验一次大小再交给系统。下载中途断过的话,这里能挡住一个装不上的残包,
     // 而不是留给系统安装器报一句看不懂的错。
-    if (info.sizeBytes > 0 && bytes.length != info.sizeBytes) {
+    final written = await file.length();
+    if (info.sizeBytes > 0 && written != info.sizeBytes) {
       throw UpdateException(
-        '下载不完整(${bytes.length}/${info.sizeBytes} 字节),请重试',
+        '下载不完整($written/${info.sizeBytes} 字节),请重试',
       );
     }
 
-    await file.writeAsBytes(bytes, flush: true);
     onProgress?.call(1);
 
     try {
