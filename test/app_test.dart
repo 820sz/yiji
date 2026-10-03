@@ -604,11 +604,20 @@ void main() {
       await tester.pumpAndSettle();
 
       expect(find.text('这周你码了 5k,比上周稳。'), findsOneWidget);
-      // 最后一条的思考过程保持展开:生成时它本来就是展开的,
-      // 落库时如果突然收起,整列消息会跳一下。
+      // 生成完之后思考过程**自动收起**,只留一行标题。
+      // 用户的原话是"用户还得等 ai 思考完手动收起思考过程"——
+      // 现在不用他动手了,想看再点开。
       expect(find.text('思考过程'), findsOneWidget);
-      expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
+      expect(
+        find.text('先看他这周的记录,再决定怎么回。'),
+        findsNothing,
+        reason: '收起状态不该把整段思考显示出来',
+      );
 
+      // 点开能看全文。
+      await tester.tap(find.text('思考过程'));
+      await tester.pumpAndSettle();
+      expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
       // 想看干净的正文就自己点一下收起。
       await tester.tap(find.text('思考过程'));
       await tester.pumpAndSettle();

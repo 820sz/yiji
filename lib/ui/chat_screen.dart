@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show ScrollCacheExtent;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -19,6 +20,27 @@ import 'chat_sidebar.dart';
 import 'image_cropper.dart';
 import 'meme_sheet.dart';
 import 'theme.dart';
+
+/// 聊天气泡的排版尺度。
+///
+/// 单独拎成常量是因为用户对这一块的反馈都是**具体数字**
+/// ("界面太挤""ai 头像太小""图占 ui 太大"),而零散写在 build 里的话
+/// 下一次调整就会悄悄回到原样。测试直接断言这些常量。
+class ChatMetrics {
+  const ChatMetrics._();
+
+  /// 消息头像边长。28 → 36:小的那个在 1080p 上只有指甲盖大。
+  static const avatarSize = 36.0;
+
+  /// 相邻两条消息之间的间距。8 → 14:上一版收得过头,连着两条长消息发闷。
+  static const bubbleGap = 14.0;
+
+  /// 气泡内边距(纯文字)。
+  static const bubblePadding = EdgeInsets.symmetric(horizontal: 14, vertical: 11);
+
+  /// 思考区封顶高度:内容在里面滚,不随文字长高。
+  static const reasoningMaxHeight = 170.0;
+}
 
 /// 聊天页:一个配了自己 API key 的对话窗口。
 ///
@@ -497,63 +519,61 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: messages.isEmpty && !state.streaming
                 ? _EmptyChat(hasKey: hasKey, dark: dark)
-                : ListView.builder(
-                    controller: _scroll,
-                    padding: const EdgeInsets.fromLTRB(14, 6, 14, 12),
-                    // 流式输出时每帧都会重建这一页。用 builder + key 让已经发出去的消息
-                    // 保持原样,只重建最后那条正在生成的——否则整列气泡每帧重排,
-                    // 看上去就是持续抖动。
-                    itemCount: messages.length + (state.streaming ? 1 : 0),
-                    itemBuilder: (context, index) {
-                      if (index >= messages.length) {
-                        // 用 AppScope.of 现取最新的 state:这一块的父级在流式期间
-                        // 已经不再重建了,闭包里那份 state 还是开始生成时的快照。
-                        return const _StreamingSlot();
-                      }
-                      final message = messages[index];
-                      return _MessageBlock(
-                        // key 让同一批消息在重建时被复用,而不是重新挂载。
-                        key: ValueKey('message-${message.id}'),
-                        message: message,
-                        provider: provider,
-                        avatar: aiAvatar,
-                        userAvatar: state.userAvatarBytes,
-                        userName: state.identityLabel,
-                        dark: dark,
-                        isLast: index == messages.length - 1,
-                      );
-                    },
+                // 回顶/回底**浮在列表上方**,不占布局。
+                //
+                // 用户的原话是:"回顶和回底功能,竟然单独占了一整行的图层"。
+                // 它们本来就是辅助动作,不该让聊天区矮一截——浮层既不挡正文
+                // (贴在右下角空白处),也不吃高度。
+                : Stack(
+                    children: [
+                      // 整页统一可选中:比每条消息各挂一套选区识别器省得多,
+                      // 而且跨消息复制本来就是更常见的需求。
+                      SelectionArea(
+                        child: ListView.builder(
+                          controller: _scroll,
+                          padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+                          // 多留一点预渲染范围:滚动时上下各半屏已经在树上了,
+                          // 手指带过去不会看到空白帧(用户报的"抽帧感")。
+                          scrollCacheExtent:
+                              const ScrollCacheExtent.viewport(1.5),
+                          // 流式输出时每帧都会重建这一页。用 builder + key 让已经发出去的
+                          // 消息保持原样,只重建最后那条正在生成的——否则整列气泡每帧重排,
+                          // 看上去就是持续抖动。
+                          itemCount: messages.length + (state.streaming ? 1 : 0),
+                          itemBuilder: (context, index) {
+                            if (index >= messages.length) {
+                              // 用 AppScope.of 现取最新的 state:这一块的父级在流式期间
+                              // 已经不再重建了,闭包里那份 state 还是开始生成时的快照。
+                              return const _StreamingSlot();
+                            }
+                            final message = messages[index];
+                            return _MessageBlock(
+                              // key 让同一批消息在重建时被复用,而不是重新挂载。
+                              key: ValueKey('message-${message.id}'),
+                              message: message,
+                              provider: provider,
+                              avatar: aiAvatar,
+                              userAvatar: state.userAvatarBytes,
+                              userName: state.identityLabel,
+                              dark: dark,
+                              isLast: index == messages.length - 1,
+                            );
+                          },
+                        ),
+                      ),
+                      Positioned(
+                        right: 12,
+                        bottom: 10,
+                        child: _JumpButtons(
+                          dark: dark,
+                          awayFromBottom: _awayFromBottom,
+                          onTop: () => _animateTo(0),
+                          onBottom: () => _scrollToBottom(animate: true),
+                        ),
+                      ),
+                    ],
                   ),
           ),
-          // 回顶/回底。
-          //
-          // 用户明确要过("缺少↓和↑的回顶回底功能")。长对话里往上翻几十屏之后,
-          // 想回到最新一条要么一直滑、要么下拉刷新;这里给两个直达按钮。
-          // 停在底部时只显示「回顶」(不挡视线),离开底部后两个都给。
-          if (messages.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 0, 14, 4),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  _JumpButton(
-                    icon: Icons.vertical_align_top,
-                    tooltip: '回到最早',
-                    dark: dark,
-                    onTap: () => _animateTo(0),
-                  ),
-                  if (_awayFromBottom) ...[
-                    const SizedBox(width: 8),
-                    _JumpButton(
-                      icon: Icons.vertical_align_bottom,
-                      tooltip: '回到最新',
-                      dark: dark,
-                      onTap: () => _scrollToBottom(animate: true),
-                    ),
-                  ],
-                ],
-              ),
-            ),
           if (_error != null)
             Padding(
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
@@ -729,9 +749,59 @@ class _SearchStatusBar extends StatelessWidget {
   }
 }
 
-/// 聊天列表上方那个"回顶/回底"小圆钮。
+/// 浮在聊天列表右下角的回顶/回底。
 ///
-/// 做得克制:半透明、平时不抢视线,但命中区撑到 36,单手也好点。
+/// 两个设计要点:
+/// 1. **不占布局**——它们是辅助动作,不该让聊天区矮一截(用户明确抱怨过这点)。
+/// 2. **只在用得上时出现**——停在最新一条时不显示「回底」(没意义),
+///    完全在顶部时不显示「回顶」。出现/消失用淡入淡出,不用位移,
+///    免得在滚动时跟着手指抖。
+class _JumpButtons extends StatelessWidget {
+  const _JumpButtons({
+    required this.dark,
+    required this.awayFromBottom,
+    required this.onTop,
+    required this.onBottom,
+  });
+
+  final bool dark;
+  final bool awayFromBottom;
+  final VoidCallback onTop;
+  final VoidCallback onBottom;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.end,
+      children: [
+        AnimatedOpacity(
+          // 停在底部时"回到最新"没有意义,直接隐藏。
+          opacity: awayFromBottom ? 1 : 0,
+          duration: const Duration(milliseconds: 150),
+          child: IgnorePointer(
+            ignoring: !awayFromBottom,
+            child: _JumpButton(
+              icon: Icons.vertical_align_bottom,
+              tooltip: '回到最新',
+              dark: dark,
+              onTap: onBottom,
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        _JumpButton(
+          icon: Icons.vertical_align_top,
+          tooltip: '回到最早',
+          dark: dark,
+          onTap: onTop,
+        ),
+      ],
+    );
+  }
+}
+
+/// 单个圆形小钮。半透明、平时不抢视线,命中区撑到 40 好点。
 class _JumpButton extends StatelessWidget {
   const _JumpButton({
     required this.icon,
@@ -752,16 +822,17 @@ class _JumpButton extends StatelessWidget {
     return Tooltip(
       message: tooltip,
       child: Material(
-        color: (dark ? AppTheme.darkSurface : Colors.white).withValues(alpha: 0.92),
+        // 半透明:压在消息上时要能看见底下的字,别像一块不透明的补丁。
+        color: (dark ? AppTheme.darkSurface : Colors.white).withValues(alpha: 0.86),
         shape: const CircleBorder(),
-        elevation: 1,
+        elevation: 2,
         child: InkWell(
           onTap: onTap,
           customBorder: const CircleBorder(),
           child: SizedBox(
-            width: 36,
-            height: 36,
-            child: Icon(icon, size: 19, color: textSecondary),
+            width: 40,
+            height: 40,
+            child: Icon(icon, size: 20, color: textSecondary),
           ),
         ),
       ),
@@ -1081,7 +1152,14 @@ class _MessageBlock extends StatelessWidget {
           ReasoningPanel(
             text: message.reasoning,
             dark: dark,
-            initiallyExpanded: isLast,
+            // 落库之后一律收起。
+            //
+            // 以前这里传 isLast,让刚生成完的那条保持展开——那是因为当时
+            // 收起会让回答完成瞬间高度突变、整列往上跳。现在收起本身带了
+            // 动画(AnimatedSize),而且**顺带解决了用户抱怨的那个问题**:
+            // "用户还得等 ai 思考完手动收起思考过程"。生成完就自己收掉,
+            // 想看再点开。
+            initiallyExpanded: false,
           ),
         _Bubble(
           text: message.content,
@@ -1168,14 +1246,43 @@ class ReasoningPanel extends StatefulWidget {
 class _ReasoningPanelState extends State<ReasoningPanel> {
   late bool _expanded = widget.live || widget.initiallyExpanded;
 
+  /// 判断"用户有没有自己动过这个折叠面板"。
+  ///
+  /// 用户的原话:"流式思考经常直接一口气把屏幕顶满,用户还得等 ai 思考完
+  /// 手动收起思考过程"。所以思考结束时**自动收起**是必须的。
+  ///
+  /// 但如果用户在思考过程中自己点开看了,就不能再自动收起——
+  /// 那会把他正在读的东西抽走。所以只自动收起"他没碰过"的那种。
+  bool _userToggled = false;
+
+  /// 思考区内部滚动用的控制器。
+  ///
+  /// **必须显式持有**:Scrollbar 要求关联的 controller 上只挂一个
+  /// ScrollPosition,而它默认会去用 PrimaryScrollController —— 外层消息列表
+  /// 也挂在同一个主控制器上,于是直接抛
+  /// "attached to more than one ScrollPosition"。
+  final ScrollController _inner = ScrollController();
+
+  @override
+  void dispose() {
+    _inner.dispose();
+    super.dispose();
+  }
+
+  /// 思考区的**固定高度**。
+  ///
+  /// 这是这一条需求的全部要点:参考 DS app——区域大小定死、内容在里面滚动。
+  /// 以前是"文字多高就长多高",一段长思考直接把屏幕顶满,
+  /// 正在写的回答被挤到看不见的地方,用户还得等它想完再手动收起。
+  static const _maxHeight = ChatMetrics.reasoningMaxHeight;
+
   @override
   void didUpdateWidget(ReasoningPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 从"正在思考"变成"思考完了"时**保持展开**。
-    //
-    // 以前这里会自动收起,于是回答刚写完的那一瞬间,上面这一块突然缩掉,
-    // 整列消息往上跳一下——用户看到的就是"回答完成时闪一下/跳一下"。
-    // 生成结束时高度不该变,要收起来由他自己点。
+    // 思考结束(生成中 → 完成)时自动收起。
+    if (oldWidget.live && !widget.live && !_userToggled) {
+      setState(() => _expanded = false);
+    }
   }
 
   @override
@@ -1185,13 +1292,18 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
     final surface = widget.dark ? AppTheme.darkSurface : AppTheme.lightSurface;
 
     return Padding(
-      padding: const EdgeInsets.only(left: 40, right: 30, bottom: 6),
+      padding: const EdgeInsets.only(left: 46, right: 36, bottom: 8),
       child: Material(
         color: surface,
         borderRadius: BorderRadius.circular(12),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
-          onTap: widget.live ? null : () => setState(() => _expanded = !_expanded),
+          // 思考中也能点开/收起:以前 live 时整个面板不可点,用户想看一眼
+          // 它到底在纠结什么也没办法。
+          onTap: () => setState(() {
+            _userToggled = true;
+            _expanded = !_expanded;
+          }),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
             child: Column(
@@ -1217,17 +1329,16 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                       ),
                     ),
                     const Spacer(),
-                    if (!widget.live)
-                      AnimatedRotation(
-                        turns: _expanded ? 0.5 : 0,
-                        duration: AppTheme.fast,
-                        curve: AppTheme.easeOut,
-                        child: Icon(
-                          Icons.keyboard_arrow_down,
-                          size: 18,
-                          color: textSecondary,
-                        ),
+                    AnimatedRotation(
+                      turns: _expanded ? 0.5 : 0,
+                      duration: AppTheme.fast,
+                      curve: AppTheme.easeOut,
+                      child: Icon(
+                        Icons.keyboard_arrow_down,
+                        size: 18,
+                        color: textSecondary,
                       ),
+                    ),
                   ],
                 ),
                 AnimatedSize(
@@ -1237,14 +1348,37 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                   child: _expanded
                       ? Padding(
                           padding: const EdgeInsets.only(top: 7),
-                          child: SizedBox(
-                            width: double.infinity,
-                            child: Text(
-                              widget.text,
-                              style: TextStyle(
-                                fontSize: 13,
-                                height: 1.6,
-                                color: textSecondary,
+                          child: ConstrainedBox(
+                            // **高度封顶 + 内部滚动**,而不是让它随文字长高。
+                            constraints: const BoxConstraints(maxHeight: _maxHeight),
+                            child: PrimaryScrollController.none(
+                              // 这层 Scrollbar 必须有自己的控制器,不能借用
+                              // PrimaryScrollController:外层消息列表也挂在同一个
+                              // 主控制器上,一个控制器挂两个位置会直接抛
+                              // "attached to more than one ScrollPosition"。
+                              child: Scrollbar(
+                                controller: _inner,
+                                // 内容还在长时不要显示滚动条:它会在每一帧抖动。
+                                thumbVisibility: !widget.live,
+                                child: SingleChildScrollView(
+                                  controller: _inner,
+                                  primary: false,
+                                  // 流式追加时**跟着滚到底**,这样看到的是最新想法;
+                                  // 用户往上翻的时候它会停在原处。
+                                  reverse: true,
+                                  padding: const EdgeInsets.only(right: 6),
+                                  child: SizedBox(
+                                    width: double.infinity,
+                                    child: Text(
+                                      widget.text,
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        height: 1.6,
+                                        color: textSecondary,
+                                      ),
+                                    ),
+                                  ),
+                                ),
                               ),
                             ),
                           ),
@@ -1289,9 +1423,9 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    // 气泡宽度上限。QQ/微信那种紧凑感来自"气泡贴着内容",所以这里比常见
-    // 的 0.75 再收一点:长句换行更早,但右侧留白也跟着变少。
-    final maxWidth = MediaQuery.of(context).size.width * 0.66;
+    // 气泡宽度上限。QQ/微信那种紧凑感来自"气泡贴着内容",所以这里比常见的
+    // 0.75 再收一点:长句换行更早,但右侧留白也跟着变少。
+    final maxWidth = MediaQuery.of(context).size.width * 0.68;
 
     // 正文里可能夹着图片行(`![图] <引用>`)。要把它们**画成图**,
     // 而不是把那一行当文字显示出来——用户发的是照片,不是文件名。
@@ -1309,15 +1443,24 @@ class _Bubble extends StatelessWidget {
     final bare = images.isNotEmpty && texts.isEmpty;
 
     return Padding(
-      // 消息之间的间隔也收一点:原来 10 加上气泡内边距,一屏放不下几条。
-      padding: const EdgeInsets.only(bottom: 8),
+      // 消息之间的间隔。用户反馈"气泡之间太密,上下留白不够"——
+      // 上一版从 10 收到 8 是为了紧凑,但连着两条长消息时读起来发闷。
+      // 定成 [ChatMetrics.bubbleGap]:比微信略紧、比之前的 8 松。
+      padding: const EdgeInsets.only(bottom: ChatMetrics.bubbleGap),
       child: Row(
         mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser) ...[
-            AiAvatar(provider: provider, bytes: avatar, dark: dark, size: 28),
-            const SizedBox(width: 8),
+            // 头像从 28 提到 36。用户说"ai 头像太小"——
+            // 28 在 1080p 上只有指甲盖大,头像里的图形完全看不清。
+            AiAvatar(
+              provider: provider,
+              bytes: avatar,
+              dark: dark,
+              size: ChatMetrics.avatarSize,
+            ),
+            const SizedBox(width: 10),
           ],
           Flexible(
             child: bare
@@ -1335,13 +1478,13 @@ class _Bubble extends StatelessWidget {
                       // 有图时稍微放宽一点,但仍然不让一张图吃掉半屏。
                       maxWidth: images.isNotEmpty ? maxWidth * 1.1 : maxWidth,
                     ),
-                    padding: EdgeInsets.symmetric(
-                      horizontal: images.isNotEmpty ? 7 : 12,
-                      vertical: images.isNotEmpty ? 7 : 9,
-                    ),
+                    // 内边距。用户说"气泡内文字太贴边"——上一版 12/9 是偏紧。
+                    padding: images.isNotEmpty
+                        ? const EdgeInsets.all(8)
+                        : ChatMetrics.bubblePadding,
                     decoration: BoxDecoration(
                       color: isUser ? AppTheme.accent : surface,
-                      borderRadius: BorderRadius.circular(14),
+                      borderRadius: BorderRadius.circular(16),
                     ),
                     child: Column(
                       crossAxisAlignment: isUser
@@ -1355,11 +1498,17 @@ class _Bubble extends StatelessWidget {
                             padding: EdgeInsets.only(
                               top: images.isNotEmpty && i == 0 ? 4 : 0,
                             ),
-                            child: SelectableText(
+                            // 用 Text 而不是 SelectableText:后者会给每条消息
+                            // 挂上一套选区手势识别器 + 独立的选区状态,
+                            // 一屏十几条时滚动明显掉帧(用户报的"上下划动不丝滑、
+                            // 有卡顿和抽帧感")。要选中时整页统一选即可,
+                            // 见消息列表外那层 SelectionArea。
+                            child: Text(
                               texts[i],
                               style: TextStyle(
                                 fontSize: 15,
-                                height: 1.5,
+                                // 1.6 而不是 1.5:中文行距太紧会糊成一片。
+                                height: 1.6,
                                 color: isUser ? Colors.white : textPrimary,
                               ),
                             ),
@@ -1370,17 +1519,18 @@ class _Bubble extends StatelessWidget {
           ),
           if (streaming)
             const Padding(
-              padding: EdgeInsets.only(left: 6, top: 10),
+              padding: EdgeInsets.only(left: 6, top: 12),
               child: SizedBox(
                 width: 9,
                 height: 9,
                 child: CircularProgressIndicator(strokeWidth: 2),
               ),
             ),
-          // 用户那侧的头像放在气泡右边,和 AI 那侧对称。
+          // 用户那侧的头像放在气泡右边,和 AI 那侧对称、同样大小。
+          // (两边不等大时视觉上会往小的一侧倾。)
           if (isUser) ...[
             const SizedBox(width: 10),
-            UserAvatar(bytes: userAvatar, name: userName, size: 30),
+            UserAvatar(bytes: userAvatar, name: userName, size: 36),
           ],
         ],
       ),
@@ -1625,15 +1775,21 @@ class _Composer extends StatelessWidget {
         ),
       ),
       padding: EdgeInsets.only(
-        left: 14,
-        right: 10,
-        top: 8,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 8,
+        left: 16,
+        right: 12,
+        top: 10,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 10,
       ),
       child: Column(
         children: [
-          Align(
-            alignment: Alignment.centerLeft,
+          // 这两个胶囊**横向可滚**,不是硬挤在一行里。
+          //
+          // 用户反馈"输入框那排按钮太挤"。挤的根源是这一行必须容下两个
+          // 带文字的胶囊,而文字长度随状态变("带上近期数据"↔具体日期区间,
+          // "联网搜索"↔"联网搜索已开")——窄屏上必然溢出。
+          // 让它能滚,就不用为了塞下最长的那种情况去压缩间距。
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
             child: Row(
               children: [
                 InkWell(
@@ -1727,11 +1883,11 @@ class _Composer extends StatelessWidget {
               ],
             ),
           ),
-          const SizedBox(height: 6),
+          const SizedBox(height: 8),
           // 已附上的图片/文件先在这儿露个脸,可以逐个去掉。
           if (attachments.isNotEmpty) ...[
             SizedBox(
-              height: 46,
+              height: 58,
               child: ListView.builder(
                 scrollDirection: Axis.horizontal,
                 itemCount: attachments.length,
@@ -1742,7 +1898,7 @@ class _Composer extends StatelessWidget {
                 ),
               ),
             ),
-            const SizedBox(height: 6),
+            const SizedBox(height: 8),
           ],
           Row(
             crossAxisAlignment: CrossAxisAlignment.end,

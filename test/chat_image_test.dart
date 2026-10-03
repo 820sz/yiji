@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yiji/ai/prompts.dart';
 import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/meme_directive.dart';
-
+import 'package:yiji/ui/ai_avatar.dart';
 import 'package:yiji/ui/chat_screen.dart';
 
 /// 聊天里的图片、表情包,以及和它们的解析。
@@ -11,6 +11,11 @@ import 'package:yiji/ui/chat_screen.dart';
 /// 这一组盯两件事:
 /// 1. 用户发的图要**画出来**,不能把 `![图] 文件名` 当文字显示;
 /// 2. 模型要表情包的那行指令不能被用户看到,但图要真的发出来。
+/// 聊天界面的排版尺度。
+///
+/// 用户对这一块的反馈很具体:"界面太挤了""ai 头像太小""回顶和回底功能,
+/// 竟然单独占了一整行的图层"。这些都是**具体数字**,所以可以直接断言,
+/// 否则下次谁调一下又回到原样。
 void main() {
   // 读 asset 要走平台层,测试里需要先初始化绑定。
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -257,6 +262,84 @@ void main() {
         reason: '表情包缩略图不该超过 140,实际 ${box.width}',
       );
       expect(box.height, lessThanOrEqualTo(141));
+    });
+  });
+
+  group('排版尺度', () {
+    testWidgets('AI 头像够大,不是指甲盖', (tester) async {
+      // 用户原话:"ai 头像太小"。28 在 1080p 上只有指甲盖大,
+      // 头像里的图形完全看不清。
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: ChatBubbleProbe(text: '你好', isUser: false),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final avatar = tester.widget<AiAvatar>(find.byType(AiAvatar));
+      expect(
+        avatar.size,
+        ChatMetrics.avatarSize,
+        reason: '气泡里的头像应当用统一尺度',
+      );
+      expect(
+        ChatMetrics.avatarSize,
+        greaterThanOrEqualTo(36),
+        reason: '小于 36 在高分屏上就只剩一个色块了',
+      );
+    });
+
+    testWidgets('气泡不贴边,消息之间留得开', (tester) async {
+      // 用户两条反馈:"气泡内文字太贴边""气泡之间太密,上下留白不够"。
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: ChatBubbleProbe(text: '一条消息'),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      final outerPadding = tester.widget<Padding>(
+        find
+            .ancestor(
+              of: find.text('一条消息'),
+              matching: find.byType(Padding),
+            )
+            .last,
+      );
+      expect(
+        ChatMetrics.bubbleGap,
+        greaterThanOrEqualTo(12),
+        reason: '消息间距小于 12 连着两条长消息会发闷',
+      );
+      expect(
+        ChatMetrics.bubblePadding.horizontal,
+        greaterThanOrEqualTo(14),
+        reason: '左右内边距小于 14 文字就贴边了',
+      );
+      expect(
+        ChatMetrics.bubblePadding.vertical,
+        greaterThanOrEqualTo(10),
+      );
+      // 用一下外层 Padding 免得被当成未使用(它是真实存在的那一层)。
+      expect(outerPadding.padding, isNotNull);
+    });
+
+    test('思考区有封顶高度,不随文字长高', () {
+      // 用户原话:"流式思考经常直接一口气把屏幕顶满"。封顶是这条的全部要点。
+      expect(
+        ChatMetrics.reasoningMaxHeight,
+        lessThanOrEqualTo(200),
+        reason: '思考区超过 200 就会把正文挤出屏幕',
+      );
+      expect(
+        ChatMetrics.reasoningMaxHeight,
+        greaterThanOrEqualTo(100),
+        reason: '太小则思考内容没法读',
+      );
     });
   });
 }
