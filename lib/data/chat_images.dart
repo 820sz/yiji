@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:flutter/services.dart' show rootBundle;
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -29,23 +28,38 @@ class ChatImage {
   /// 本地文件(仅 [isAsset] 为假时有意义)。
   String get fileName => ref;
 
-  /// 消息文本里的标记前缀。用 `![图]` 而不是自定义符号:一眼能看出是图片。
-  static const marker = '![图]';
-
-  /// 从消息文本里解析出这一行的图片标记;不是标记行返回 null。
-  ///
-  /// 行尾可以跟一段说明(`![图] asset:... | 被摸头眯眼冒爱心`),那是给 AI 看的:
-  /// 它看不到图,但需要知道用户发的是哪张表情包、什么情绪,不然接不上梗。
+  /// 解析用:不是标记行返回 null。
   static ChatImage? parse(String line) {
-    final trimmed = line.trim();
+    final trimmed = stripDecoration(line);
     if (!trimmed.startsWith(marker)) return null;
     final body = trimmed.substring(marker.length).trim();
     if (body.isEmpty) return null;
     // 竖线之后是说明,渲染时用不到,但它必须被容忍(不能当成引用的一部分)。
     final bar = body.indexOf('|');
     final ref = (bar < 0 ? body : body.substring(0, bar)).trim();
-    return ref.isEmpty ? null : ChatImage(ref: ref);
+    // 路径里出现省略号说明是**模型自己打出来的**,不是真实路径。
+    if (ref.isEmpty || ref.contains('...') || ref.contains('…')) return null;
+    return ChatImage(ref: ref);
   }
+
+  /// 去掉模型可能加上的装饰:反引号、列表符号、引用符号、加粗星号。
+  ///
+  /// 模型经常把这一行当代码写,输出 `` `![图] asset:...` `` 甚至
+  /// `- \`![图] ...\``。带装饰的话解析直接落空,界面就把这一行原样显示成
+  /// 文字——用户看到的是"图不在了"或者一串路径。
+  static String stripDecoration(String line) {
+    var text = line.trim();
+    // 列表符号 / 引用符号
+    text = text.replaceFirst(RegExp(r'^[-*>+]\s+'), '');
+    // 反引号(整行包住的)
+    text = text.replaceAll('`', '');
+    // 加粗星号
+    text = text.replaceAll('**', '');
+    return text.trim();
+  }
+
+  /// 消息文本里的标记前缀。用 `![图]` 而不是自定义符号:一眼能看出是图片。
+  static const marker = '![图]';
 }
 
 /// 表情包图库里的一条。
@@ -55,31 +69,51 @@ class Meme {
     required this.tag,
     required this.caption,
     required this.keywords,
+    this.fromUser = false,
   });
 
-  /// 相对 `assets/memes/` 的路径,例如 `happy/123.webp`。
+  /// 相对 `assets/memes/` 的路径(内置),或相对用户图库目录的文件名(自添加)。
   final String file;
 
   /// 情绪分类:angry / confused / daily / happy / sad / shy / sleep / surprised / work。
+  /// 用户自添加的图没有现成分类,统一落在 `mine`。
   final String tag;
 
-  /// 一句中文描述,用来展示和给模型参考。
+  /// 一句中文描述。**AI 就是靠这句话挑图的**,所以用户自添加的图也要填。
   final String caption;
 
   /// 空格分隔的中文关键词。
   final String keywords;
 
+  /// 是不是用户自己添加的(不在安装包里,在应用私有目录)。
+  final bool fromUser;
+
+  /// 消息里记的引用:内置的带 `asset:` 前缀,自添加的就是文件名。
+  ///
+  /// 两种来源共用一条消息格式,渲染和"把历史图再发给模型"都只需要认这个引用,
+  /// 不必各自记两套逻辑。
+  String get messageRef => fromUser ? file : 'asset:$assetPath';
+
+  /// 内置图的包内路径。用户自添加的没有意义。
   String get assetPath => 'memes/$file';
 
   /// 给模型看的那个短 id(不带目录和扩展名,省 token)。
   String get id => p.basenameWithoutExtension(file);
 
-  static Meme fromJson(Map<String, Object?> json) => Meme(
+  static Meme fromJson(Map<String, Object?> json, {bool fromUser = false}) => Meme(
         file: (json['file'] as String?) ?? '',
         tag: (json['tag'] as String?) ?? '',
         caption: (json['caption'] as String?) ?? '',
         keywords: (json['keywords'] as String?) ?? '',
+        fromUser: fromUser,
       );
+
+  Map<String, Object?> toJson() => {
+        'file': file,
+        'tag': tag,
+        'caption': caption,
+        'keywords': keywords,
+      };
 
   /// 检索用的词袋:描述 + 关键词。
   List<String> get haystack => [
@@ -92,6 +126,13 @@ class Meme {
 ///
 /// 索引随 APK 打包(assets/memes/index.json),所以**离线也能发表情包**,
 /// 不需要联网、不需要额外下载。图本身按需从 asset 取,不进内存。
+///
+/// 图库由**两份来源合并**:
+/// - 内置:安装包里的 108 张,只读;
+/// - 用户自添加:应用私有目录里的 `user_memes/`,一份 JSON 索引 + 图片文件。
+///
+/// 合并之后,挑图、清单、渲染、手动挑选面板全都只看这一份结果,
+/// 所以"以后自己加图"不需要改提示词或解析逻辑——这是刻意留的扩展点。
 class MemeLibrary {
   MemeLibrary._(this.memes);
 
@@ -103,11 +144,12 @@ class MemeLibrary {
   factory MemeLibrary.fromIndex(List<Meme> memes) => MemeLibrary._(memes);
 
   /// 解析一份索引 JSON(和 assets 里那份格式相同),返回条目。
-  static List<Meme> parseIndex(Object? decoded) {
+  static List<Meme> parseIndex(Object? decoded, {bool fromUser = false}) {
     if (decoded is! List) return const [];
     return [
       for (final item in decoded)
-        if (item is Map) Meme.fromJson(item.cast<String, Object?>()),
+        if (item is Map)
+          Meme.fromJson(item.cast<String, Object?>(), fromUser: fromUser),
     ].where((m) => m.file.isNotEmpty).toList();
   }
 
@@ -134,21 +176,36 @@ class MemeLibrary {
 
   static MemeLibrary? _cached;
 
-  /// 读图库。读不到时返回空图库(没打包素材也不该让聊天崩掉)。
+  /// 读图库:**内置 + 用户自添加合并**。
+  ///
+  /// 读不到内置素材时返回空图库(某些构建变体没打包),不该让聊天崩掉;
+  /// 用户那部分读不到也只是少几张,一样不该崩。
   static Future<MemeLibrary> load() async {
     final cached = _cached;
     if (cached != null) return cached;
+
+    var builtin = const <Meme>[];
     try {
       final raw = await rootBundle.loadString(_indexPath);
-      return _cached = MemeLibrary._(parseIndex(jsonDecode(raw)));
+      builtin = parseIndex(jsonDecode(raw));
     } catch (_) {
-      // 素材没打进包(比如某些构建变体)时,表情包功能静默不可用,
-      // 其余聊天功能照常。
-      return _cached = MemeLibrary._(const []);
+      // 素材没打进包:表情包功能静默不可用,其余聊天功能照常。
     }
+
+    final user = await ChatImages.loadUserMemes();
+    // 用户添加的排在后面:内置那批有精心写好的分类和描述,先让它们参与匹配;
+    // 用户那批是同分时的补充。
+    return _cached = MemeLibrary._([...builtin, ...user]);
   }
 
+  /// 丢掉缓存。用户添加/删除表情包之后要调一次,否则新图进不了清单。
+  static void invalidate() => _cached = null;
+
   bool get isEmpty => memes.isEmpty;
+
+  /// 用户自添加的那些。
+  List<Meme> get userMemes =>
+      [for (final meme in memes) if (meme.fromUser) meme];
 
   /// 所有出现过的情绪标签,按字母序,供用户手动挑。
   List<String> get tags {
@@ -279,9 +336,14 @@ class ChatImages {
   /// 测试环境没有 path_provider 的平台通道,`getApplicationSupportDirectory()`
   /// 会抛 MissingPluginException;给测试一个明确的注入口,比到处兜 Error 干净。
   static set directoryOverride(Directory? value) {
-    _dir = value;
+    // 注意这里把 _dir 置空而不是设成 value:value 是**根**目录,
+    // 而 dir() 返回的是它下面的 chat_images/ 子目录。
+    // 直接写 _dir = value 会让后续读写落到根目录上,和真实布局不一致
+    // (踩过一次:测试里文件写在根上,渲染却去 chat_images 找,永远找不到)。
+    _dir = null;
     _override = value;
     _avatarDir = null;
+    _userMemeDir = null;
   }
 
   static Directory? _override;
@@ -315,6 +377,117 @@ class ChatImages {
     }
   }
 
+  /// 用户自添加表情包的目录。
+  ///
+  /// 和内置素材分开放:内置的在安装包里只读,用户加的必须在私有目录里
+  /// (否则升级安装包会把它们冲掉)。
+  static Future<Directory> userMemeDir() async {
+    final cached = _userMemeDir;
+    if (cached != null) return cached;
+    final base = await _base();
+    final target = Directory(p.join(base.path, 'user_memes'));
+    if (!await target.exists()) await target.create(recursive: true);
+    return _userMemeDir = target;
+  }
+
+  static Directory? _userMemeDir;
+
+  /// 用户表情包的索引文件名。
+  static const _userIndexName = 'index.json';
+
+  /// 读用户自添加的表情包索引。没有就返回空。
+  static Future<List<Meme>> loadUserMemes() async {
+    try {
+      final dir = await userMemeDir();
+      final index = File(p.join(dir.path, _userIndexName));
+      if (!await index.exists()) return const [];
+      final decoded = jsonDecode(await index.readAsString());
+      // 索引里记了但文件被清理掉的条目要跳过,否则 AI 会挑到一张打不开的图。
+      final entries = MemeLibrary.parseIndex(decoded, fromUser: true);
+      final alive = <Meme>[];
+      for (final meme in entries) {
+        if (await File(p.join(dir.path, meme.file)).exists()) alive.add(meme);
+      }
+      return alive;
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  /// 加一张用户表情包,返回新条目。失败返回 null。
+  ///
+  /// [caption] 是**必须的**:AI 挑图靠的就是这句话,留空的话这张图
+  /// 永远进不了它的候选清单——用户会以为加了却用不上。
+  static Future<Meme?> addUserMeme({
+    required Uint8List bytes,
+    required String caption,
+    String keywords = '',
+    String tag = 'mine',
+  }) async {
+    final text = caption.trim();
+    if (text.isEmpty) return null;
+    try {
+      final dir = await userMemeDir();
+      final name = 'user_${DateTime.now().microsecondsSinceEpoch}.png';
+      await File(p.join(dir.path, name)).writeAsBytes(bytes, flush: true);
+
+      final meme = Meme(
+        file: name,
+        tag: tag.trim().isEmpty ? 'mine' : tag.trim(),
+        caption: text,
+        keywords: keywords.trim(),
+        fromUser: true,
+      );
+      final existing = await loadUserMemes();
+      await _writeUserIndex(dir, [...existing, meme]);
+      MemeLibrary.invalidate();
+      return meme;
+    } on Exception {
+      return null;
+    }
+  }
+
+  /// 删掉一张用户表情包(连同它的索引项和图片文件)。
+  static Future<bool> removeUserMeme(Meme meme) async {
+    if (!meme.fromUser) return false;
+    try {
+      final dir = await userMemeDir();
+      final remaining =
+          (await loadUserMemes()).where((m) => m.file != meme.file).toList();
+      await _writeUserIndex(dir, remaining);
+      final file = File(p.join(dir.path, meme.file));
+      if (await file.exists()) await file.delete();
+      MemeLibrary.invalidate();
+      return true;
+    } on Exception {
+      return false;
+    }
+  }
+
+  static Future<void> _writeUserIndex(Directory dir, List<Meme> memes) async {
+    final index = File(p.join(dir.path, _userIndexName));
+    await index.writeAsString(
+      jsonEncode([for (final meme in memes) meme.toJson()]),
+      flush: true,
+    );
+  }
+
+  /// 取一张表情包的字节:内置的走 asset,用户自添加的走用户目录。
+  static Future<Uint8List?> memeBytes(Meme meme) async {
+    try {
+      if (!meme.fromUser) {
+        final data = await rootBundle.load('assets/${meme.assetPath}');
+        return data.buffer.asUint8List();
+      }
+      final dir = await userMemeDir();
+      final file = File(p.join(dir.path, meme.file));
+      if (!await file.exists()) return null;
+      return await file.readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// 取一张已保存的图。不存在返回 null。
   static Future<File?> file(String name) async {
     try {
@@ -324,6 +497,50 @@ class ChatImages {
     } on Exception {
       return null;
     }
+  }
+
+  /// 把消息文本里所有图片行的字节读成 data URL,供多模态请求使用。
+  ///
+  /// 用来**把历史里的图重新发给模型**。以前只有当前这一轮带图,历史只带
+  /// `![图] asset:...` 这行文字——模型于是只能看到一句路径,完全不知道
+  /// 用户当时发的是什么。用户的原话:"用户发的表情包,ai 看不到"。
+  ///
+  /// 读不到的条目直接跳过(文件被清理、asset 缺失),不阻断整次请求。
+  static Future<List<String>> imageDataUrls(String content) async {
+    final urls = <String>[];
+    for (final line in content.split('\n')) {
+      final image = ChatImage.parse(line);
+      if (image == null) continue;
+      final bytes = await bytesOf(image);
+      if (bytes == null || bytes.isEmpty) continue;
+      urls.add('data:image/${_mimeOf(image)};base64,${base64Encode(bytes)}');
+    }
+    return urls;
+  }
+
+  /// 取一张图的原始字节:内置的走 asset,用户自添加的走磁盘。
+  static Future<Uint8List?> bytesOf(ChatImage image) async {
+    try {
+      if (image.isAsset) {
+        final data = await rootBundle.load('assets/${image.assetPath}');
+        return data.buffer.asUint8List();
+      }
+      final onDisk = await file(image.fileName);
+      return await onDisk?.readAsBytes();
+    } catch (_) {
+      return null;
+    }
+  }
+  static String _mimeOf(ChatImage image) {
+    final name = image.isAsset ? image.assetPath : image.fileName;
+    final ext = p.extension(name).toLowerCase();
+    return switch (ext) {
+      '.jpg' || '.jpeg' => 'jpeg',
+      '.webp' => 'webp',
+      '.gif' => 'gif',
+      '.bmp' => 'bmp',
+      _ => 'png',
+    };
   }
 
   /// 头像目录。和聊天图片分开放,便于整目录清理。

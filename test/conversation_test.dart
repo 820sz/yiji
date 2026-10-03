@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/settings_store.dart';
 import 'package:yiji/core/day.dart';
+import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/goals.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
@@ -42,6 +43,18 @@ void main() {
     );
     await tester.pumpWidget(YijiApp(state: state, enableSplash: false));
     await tester.pumpAndSettle();
+    // 表情包清单在 widget 测试里读不出来:rootBundle 的 Future 永远不完成
+    // (不报错也不返回),等它只会把用例挂死。直接喂一份图库进来,
+    // 这样"提示词里有没有发图规则"和"指令能不能定位到图"这两条断言才是确定的。
+    final catalog = MemeLibrary.fromIndex(const [
+      Meme(
+        file: 'happy/x.webp',
+        tag: 'happy',
+        caption: '摸着圆滚滚肚子，笑眯眯喊吃饱饱',
+        keywords: '大肥鱼 开心 吃饱',
+      ),
+    ]);
+    state.setMemeLibraryForTest(catalog);
   }
 
   setUp(() {
@@ -61,18 +74,21 @@ void main() {
 
   group('表情包', () {
     testWidgets('模型要表情包时,指令不会显示、图会发出来', (tester) async {
-      // 模型在回复末尾写一行 `[表情: 情绪 | 描述]`,那是给系统看的指令,
-      // 不能显示给用户;系统据此挑一张图附在回答后面。
+      // 模型回一行 `[表情: 描述]`,那是给系统看的指令,不能显示给用户;
+      // 系统按描述去图库里定位那张图,附在回答后面。
+      //
+      // 描述用的是**清单里真实存在的那一条**——现在挑图是闭集选择,
+      // 模型抄哪条就定位哪条;用编出来的描述只会落到随机兜底上。
       await pumpApp(
         tester,
-        reply: '好耶,那我也替你高兴。\n[表情: 开心 | 蹦起来比心]',
+        reply: '好耶,那我也替你高兴。\n[表情: 摸着圆滚滚肚子，笑眯眯喊吃饱饱]',
       );
       await openTab(tester, '聊天');
       await send(tester, '今天任务全做完了');
 
       // 指令行不能被用户看到。
       expect(find.textContaining('[表情'), findsNothing);
-      expect(find.textContaining('蹦起来比心'), findsNothing);
+      expect(find.textContaining('摸着圆滚滚肚子'), findsNothing);
       // 正文照常显示。
       expect(find.textContaining('那我也替你高兴'), findsOneWidget);
 

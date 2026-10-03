@@ -92,29 +92,34 @@ class ChatAttachment {
     return null;
   }
 
-  /// 从内置表情包构造一个附件。
+  /// 从内置或用户自添加的表情包构造一个附件。
   ///
-  /// 表情包不走"读字节"那条路:它已经在 APK 的 assets 里,
-  /// 消息里只要记一个 `asset:` 引用,回看时按需渲染。
+  /// [bytes] 会在发送时落盘,消息里记的是那个磁盘文件名——**不用 `asset:`
+  /// 引用**。理由:渲染和"把历史图重新发给模型"这两条路只认一种引用,
+  /// 多一种分支就多一处漏判(实测用户报过"图不在了"和 AI 看不到图)。
+  /// 拿不到字节时退回 asset 引用,至少还能渲染。
   factory ChatAttachment.meme({
     required String assetPath,
     required String caption,
     required String tag,
+    Uint8List? bytes,
   }) {
     return ChatAttachment(
       name: caption.isEmpty ? '表情包' : caption,
       isImage: true,
-      imageRef: 'asset:$assetPath',
+      imageBytes: bytes,
+      imageRef: bytes == null ? 'asset:$assetPath' : '',
       memeCaption: caption,
-      sizeBytes: 0,
+      sizeBytes: bytes?.length ?? 0,
     );
   }
 
   /// 拼进消息文本里的样子。
   ///
-  /// 图片行写成 `![图] <引用>[ | 说明]`,界面据此把图渲染出来(而不是显示文件名),
-  /// **说明**则是给 AI 看的:它看不到图,但要知道用户发的是哪张表情包、
-  /// 表达的是什么情绪——否则它没法接梗,也就谈不上"看懂用户在斗图"。
+  /// 图片行写成 `![图] <引用>[ | 说明]`,界面据此把图渲染出来(而不是显示文件名)。
+  ///
+  /// **说明保留**:模型现在能看图了(多模态),但那句话仍是有效的补充——
+  /// 它告诉模型这张图在情绪上是什么意思,尤其在画面本身不直白的时候。
   String get describe {
     if (!isImage) return '[文件] $name';
     if (imageRef.isEmpty) return '[图片] $name';

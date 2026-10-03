@@ -132,6 +132,12 @@ class AppState extends ChangeNotifier {
   List<ChatMessage> _chat = const [];
   List<ChatMessage> get chat => _chat;
 
+  /// 历史里最多补几张用户消息的图。
+  ///
+  /// 每张 base64 之后几十 KB,全补会让一轮请求膨胀到几 MB;
+  /// 而对话正在聊的通常是最近那一两张。
+  static const _historyImageTurns = 6;
+
   /// 正在流式接收的思考过程与回答(收完才落库)。
   String _streamingReasoning = '';
   String get streamingReasoning => _streamingReasoning;
@@ -189,6 +195,40 @@ class AppState extends ChangeNotifier {
   String get weekDraft => _weekDraft;
 
   /// 首次进页面时把要用的数据读出来。
+  /// 表情包清单(给模型挑图用)。
+  ///
+  /// 启动时准备好,发消息时直接读这个字符串——**不在发送路径上读资源**。
+  String _memeCatalog = '';
+
+  /// 当前表情包清单(测试断言用)。
+  String get memeCatalog => _memeCatalog;
+
+  /// 已经加载好的图库。启动时准备好,挑图时直接用。
+  MemeLibrary? _memeLibrary;
+
+  /// 直接给定图库与清单。
+  ///
+  /// 测试用:widget 测试里 `rootBundle.loadString` **永远不会完成**
+  /// (既不打日志也不报错),所以不能靠等真实读取来准备——
+  /// 等它只会把用例挂死。测试直接喂一份进来。
+  void setMemeLibraryForTest(MemeLibrary library) {
+    _memeLibrary = library;
+    _memeCatalog = library.isEmpty ? '' : library.catalogPrompt();
+  }
+
+  /// 重新读图库、刷新清单。图库为空时清单也是空的,提示词里就不会有发图规则。
+  Future<void> _prepareMemeCatalog() async {
+    try {
+      final library = await MemeLibrary.load();
+      _memeLibrary = library;
+      _memeCatalog = library.isEmpty ? '' : library.catalogPrompt();
+    } catch (_) {
+      // 图库读不出来只影响表情包,不该影响聊天。
+      _memeCatalog = '';
+    }
+    notifyListeners();
+  }
+
   Future<void> bootstrap() async {
     await _loadDay();
     // 待同步角标要在启动时就算出来。以前它只在增删改之后刷新,
@@ -204,6 +244,10 @@ class AppState extends ChangeNotifier {
     // 失败不影响别的功能(notifier 内部已经把异常吞掉了)。
     unawaited(syncReminders());
     unawaited(_checkUpdateQuietly());
+    // 表情包清单在启动时准备好。放在这里而不是发消息时读:
+    // 读资源可能在测试/异常环境里永远不完成,而它一旦挡在发送路径上,
+    // 用户看到的是"发送按钮一直转圈、消息根本发不出去"。
+    unawaited(_prepareMemeCatalog());
   }
 
   // ---------- 更新 ----------
@@ -1224,6 +1268,12 @@ class AppState extends ChangeNotifier {
 
     // 图片先落盘再记引用:消息里存 base64 会让每条消息膨胀几百 KB,
     // 回看历史和查库都会变慢。存不下来就退化成文件名——至少不丢信息。
+    //
+    // 内置表情包(imageRef 是 `asset:...`)**也要先落盘一份**,而不是直接把
+    // asset 路径写进消息。理由是渲染和历史带图这两条路只认一种引用:
+    // 多一种 `asset:` 分支就多一处漏判(用户发过的图渲染成"图不在了"、
+    // 或者重新发给模型时读不到)。用户自添加的表情包同理——它原本在
+    // user_memes/ 里,也要复制到聊天图片目录才走同一条路。
     final resolved = <ChatAttachment>[];
     for (final file in attachments) {
       if (!file.isImage || file.imageRef.isNotEmpty || file.imageBytes == null) {
@@ -1259,21 +1309,22 @@ class AppState extends ChangeNotifier {
           'data:image/${_imageMime(file.name)};base64,'
               '${base64Encode(file.imageBytes!)}',
     ];
+    // ignore: avoid_print
     final fileTexts = [
       for (final file in resolved)
         if (!file.isImage && file.text != null)
           '--- 文件:${file.name} ---\n${file.text}',
     ];
 
-    // 表情包库非空时才把发图规则写进提示词:没有素材却允许它发,
-    // 它就会写一行永远挑不到图的指令,还白占上下文。
+    // 表情包清单**不在发送这条路上读**。
     //
-    // 提示词里带的是**可选的图片清单**(每行一张图的真实描述),模型必须
-    // 从里面原样抄一条——这是学 dsh-meme 的做法。让它自己编描述的话,
-    // 编出来的句子在库里找不到对应的图,搜索落空就只能随机抽,
-    // 用户看到的就成了"发的图跟说的话配不上"。
-    final memes = await MemeLibrary.load();
-    final memeHint = memes.isEmpty ? '' : memeHintPrompt(memes.catalogPrompt());
+    // 这里原本是 `await MemeLibrary.load()`,而它里面要读打包资源。
+    // 资源取不到时那个 Future 不会抛异常也不会完成,整条 sendChat
+    // 就停在这一行:请求发不出去、发送按钮永远转圈。
+    // 现在改成启动时异步准备好(见 [_prepareMemeCatalog]),发消息时直接用
+    // 已经拿到的字符串,一次 await 都不欠。
+    final memeHint =
+        _memeCatalog.isEmpty ? '' : memeHintPrompt(_memeCatalog);
 
     final history = <AiMessage>[
       AiMessage.system(chatSystemPrompt(memeHint: memeHint)),
@@ -1308,13 +1359,32 @@ class AppState extends ChangeNotifier {
       );
     }
     // 历史里不含刚写进去的这一条——它要单独带上图片和文件内容放在最后。
+    //
+    // **历史里的图也要重新发过去**。以前只有当前这一轮带 images,历史只带
+    // `![图] asset:...` 这行文字,模型于是只看到一句路径——用户的原话是
+    // "用户发的表情包,ai 看不到",而它自己也只能回一句"我是读的文字描述"。
+    //
+    // 限制:iMessage 的图片只补最近 [_historyImageTurns] 条用户消息。
+    // 每张图 base64 之后几十 KB,全补的话一轮请求会膨胀到几 MB;
+    // 而"最近发的图"才是对话正在聊的那张。
     final past = _chat.isNotEmpty ? _chat.sublist(0, _chat.length - 1) : _chat;
-    for (final message in past.length > 20
-        ? past.sublist(past.length - 20)
-        : past) {
+    final recent = past.length > 20 ? past.sublist(past.length - 20) : past;
+    var userTurnsWithImages = 0;
+    final historyImages = <int, List<String>>{};
+    for (var i = recent.length - 1; i >= 0; i--) {
+      final message = recent[i];
+      if (!message.isUser || !message.content.contains(ChatImage.marker)) continue;
+      if (userTurnsWithImages >= _historyImageTurns) break;
+      userTurnsWithImages++;
+      final urls = await ChatImages.imageDataUrls(message.content);
+      if (urls.isNotEmpty) historyImages[i] = urls;
+    }
+
+    for (var i = 0; i < recent.length; i++) {
+      final message = recent[i];
       history.add(
         message.isUser
-            ? AiMessage.user(message.content)
+            ? AiMessage.user(message.content, images: historyImages[i] ?? const [])
             : AiMessage.assistant(message.content),
       );
     }
@@ -1421,7 +1491,9 @@ class AppState extends ChangeNotifier {
   /// 兼容老格式:`[表情: 开心 | 蹦起来]` 这种带竖线的,描述部分拿不到精确匹配,
   /// 就走"情绪 + 关键词"的老路,至少还能发一张同情绪的。
   Future<Meme?> _pickMeme(MemeDirective directive) async {
-    final library = await MemeLibrary.load();
+    // 用已经加载好的那份,而不是每次现读资源:现读在资源异常时不会返回,
+    // 会把"回答落库"这一步挂住(用户看到的是回答永远出不来)。
+    final library = _memeLibrary ?? await MemeLibrary.load();
     if (library.isEmpty) return null;
     final seed = directive.query.hashCode ^ directive.emotion.hashCode;
 

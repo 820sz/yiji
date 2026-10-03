@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:cross_file/cross_file.dart';
@@ -10,6 +11,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/settings_store.dart';
 import 'package:yiji/core/day.dart';
+import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
@@ -28,6 +30,7 @@ void main() {
   late FakeStore store;
   late AppState state;
   late _FakeAi ai;
+  late Directory tempDir;
 
   /// 在 pumpApp 之前就要定好的假回复(JSON 匹配结果)。
   ///
@@ -61,8 +64,7 @@ void main() {
       settings: await SettingsStore.load(),
       aiClient: AiClient(httpClient: ai),
     );
-    await tester.pumpWidget(YijiApp(state: state, enableSplash: false));
-    await tester.pumpAndSettle();
+    await tester.pumpWidget(YijiApp(state: state, enableSplash: false));    await tester.pumpAndSettle();
   }
 
   setUp(() {
@@ -73,6 +75,17 @@ void main() {
     // 忘了在这里清掉的话,上一条留的延迟会把后面每条都拖慢,
     // 表现为一批互不相关的用例一起失败(踩过一次)。
     replyDelay = null;
+    // 聊天图片/头像要落盘,而测试环境没有 path_provider 的平台通道:
+    // 异步取目录的 Future 永远不会完成,`pumpAndSettle` 于是直接超时
+    // (表现是一批聊天用例一起挂,原因却和聊天毫无关系)。
+    // 给一个真临时目录,读写都走真实文件系统。
+    tempDir = Directory.systemTemp.createTempSync('yiji_app_test');
+    ChatImages.directoryOverride = tempDir;
+  });
+
+  tearDown(() {
+    ChatImages.directoryOverride = null;
+    if (tempDir.existsSync()) tempDir.deleteSync(recursive: true);
   });
 
   Future<void> openTab(WidgetTester tester, String label) async {
@@ -1372,6 +1385,9 @@ final _defaultPicker = FilePickerPlatform.instance;
 class _FakeAi extends http.BaseClient {
   _FakeAi({this.presetReply, this.presetChunks, this.replyDelay});
 
+  /// 被调用了几次。用来确认"请求到底发出去了没有"。
+  int calls = 0;
+
   /// 一次性返回的完整回答(用于 JSON 匹配这类要整段的场景)。
   final String? presetReply;
 
@@ -1408,6 +1424,7 @@ class _FakeAi extends http.BaseClient {
 
   @override
   Future<http.StreamedResponse> send(http.BaseRequest request) async {
+    calls++;
     if (request is http.Request) {
       lastBody = jsonDecode(utf8.decode(request.bodyBytes)) as Map<String, Object?>;
     }

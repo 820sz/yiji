@@ -153,14 +153,22 @@ class _MemeSheetState extends State<_MemeSheet> {
               itemBuilder: (context, index) {
                 final meme = memes[index];
                 return GestureDetector(
-                  onTap: () => Navigator.pop(
-                    context,
-                    ChatAttachment.meme(
-                      assetPath: meme.assetPath,
-                      caption: meme.caption,
-                      tag: meme.tag,
-                    ),
-                  ),
+                  // 点的时候把字节读出来一起带走。理由见 ChatAttachment.meme:
+                  // 消息里统一记磁盘文件名,而不是两种引用并存——两种引用
+                  // 已经害得用户见过"图不在了"和"AI 看不到图"。
+                  onTap: () async {
+                    final bytes = await ChatImages.memeBytes(meme);
+                    if (!context.mounted) return;
+                    Navigator.pop(
+                      context,
+                      ChatAttachment.meme(
+                        assetPath: meme.assetPath,
+                        caption: meme.caption,
+                        tag: meme.tag,
+                        bytes: bytes,
+                      ),
+                    );
+                  },
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(10),
                     child: Container(
