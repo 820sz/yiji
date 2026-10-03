@@ -670,6 +670,15 @@ class _UpdateProgressDialogState extends State<_UpdateProgressDialog> {
             onPressed: () => Navigator.of(context).pop(),
             child: const Text('关闭'),
           ),
+          // 应用内下不动的时候换一条完全不同的路:交给系统下载器。
+          //
+          // 这条是给"网络拿不到 GitHub 资产"的用户准备的——应用内是流式读到
+          // 内存,受限网络会塞回拦截页或被掐断;系统下载器是独立的进程,
+          // 有通知栏进度、会自己重试,失败也看得见。
+          TextButton(
+            onPressed: _systemDownload,
+            child: const Text('用系统下载器'),
+          ),
           FilledButton(
             onPressed: () {
               _started = false;
@@ -680,6 +689,23 @@ class _UpdateProgressDialogState extends State<_UpdateProgressDialog> {
         ],
       ],
     );
+  }
+
+  /// 换系统下载器再试一次。
+  Future<void> _systemDownload() async {
+    try {
+      await widget.state.installUpdateWithSystemDownloader();
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('已交给系统下载,进度看通知栏;下完点通知即可安装'),
+        ),
+      );
+    } on Exception catch (error) {
+      if (!mounted) return;
+      setState(() => _error = '$error');
+    }
   }
 }
 

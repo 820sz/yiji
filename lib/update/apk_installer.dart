@@ -19,6 +19,31 @@ class ApkInstaller {
   static const _channel = MethodChannel('com.xi283.yiji/install');
   static const _fileName = 'yiji-update.apk';
 
+  /// 交给**系统下载器**去下(下到公共「下载」目录),不占用应用自己的网络栈。
+  ///
+  /// 为什么要有这条路:应用内下载是"读到内存再落盘",在受限网络下会拿到
+  /// 拦截页、或者被中途掐断,失败还得靠我们自己辨认。系统下载器是独立进程、
+  /// 带通知栏进度、会自己重试,网不好时成功率高得多,用户在通知栏就能看见
+  /// 到底有没有在动。
+  ///
+  /// 返回系统给的下载 id(调用方一般不用管)。
+  Future<int> downloadWithSystem(UpdateInfo info) async {
+    final url =
+        info.downloadUrl.isNotEmpty ? info.downloadUrl : info.apiDownloadUrl;
+    if (url.isEmpty) throw UpdateException('这个版本没有可用的下载地址');
+    try {
+      final id = await _channel.invokeMethod<int>('downloadWithSystem', {
+        'url': url,
+        'fileName': 'yiji-${info.versionName}.apk',
+      });
+      return id ?? 0;
+    } on PlatformException catch (error) {
+      throw UpdateException(error.message ?? '系统下载器启动失败');
+    } on MissingPluginException {
+      throw UpdateException('这台设备不支持系统下载,请手动下载');
+    }
+  }
+
   /// 下载并打开系统安装界面。
   ///
   /// [onProgress] 收到 0..1 的进度。

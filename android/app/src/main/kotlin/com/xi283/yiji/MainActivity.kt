@@ -1,9 +1,11 @@
 package com.xi283.yiji
 
+import android.app.DownloadManager
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.Environment
 import android.provider.Settings
 import androidx.core.content.FileProvider
 import androidx.core.view.WindowCompat
@@ -50,6 +52,21 @@ class MainActivity : FlutterActivity() {
                             installApk(path, result)
                         }
                     }
+                    // 交给系统下载器。
+                    //
+                    // 应用内那条路(Dart 流式读到内存再落盘)在受限网络下会拿到
+                    // 拦截页、或者被中途掐断,而且失败只能靠我们自己辨认。
+                    // 系统下载器是独立的、带通知进度、会自己重试,失败了用户也能
+                    // 在通知栏看见并重来——网络不好的时候这条路成功率高得多。
+                    "downloadWithSystem" -> {
+                        val url = call.argument<String>("url")
+                        val fileName = call.argument<String>("fileName") ?: "yiji-update.apk"
+                        if (url == null) {
+                            result.error("bad_args", "缺少 url", null)
+                        } else {
+                            startSystemDownload(url, fileName, result)
+                        }
+                    }
                     else -> result.notImplemented()
                 }
             }
@@ -90,6 +107,31 @@ class MainActivity : FlutterActivity() {
             }
         }
         return false
+    }
+
+    /// 用系统下载器把安装包下到公共「下载」目录。
+    ///
+    /// 选公共下载目录而不是应用私有目录:下载完的通知点一下就能装,
+    /// 装不上时用户也能自己在文件管理器里找到它。
+    private fun startSystemDownload(url: String, fileName: String, result: MethodChannel.Result) {
+        try {
+            val request = DownloadManager.Request(Uri.parse(url))
+                .setTitle("忆记更新包")
+                .setDescription("正在下载 $fileName")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(
+                    DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED
+                )
+                .setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName)
+                // 允许在计费网络上继续:用户既然主动点了,就别因为切到流量而中断。
+                .setAllowedOverMetered(true)
+
+            val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+            val id = manager.enqueue(request)
+            result.success(id)
+        } catch (error: Exception) {
+            result.error("download_failed", error.message ?: "系统下载器启动失败", null)
+        }
     }
 
     /// Android 8 起安装未知来源应用需要用户单独授权。

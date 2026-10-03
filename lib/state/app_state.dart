@@ -345,6 +345,16 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  /// 让系统下载器去下这个更新包。
+  ///
+  /// 应用内下载在受限网络下会拿到拦截页或被掐断;这条路交给系统,
+  /// 用户在通知栏能看到真实进度,失败也能重来。
+  Future<void> installUpdateWithSystemDownloader() async {
+    final info = _availableUpdate;
+    if (info == null) return;
+    await _installer.downloadWithSystem(info);
+  }
+
   void dismissUpdate() {
     _availableUpdate = null;
     notifyListeners();

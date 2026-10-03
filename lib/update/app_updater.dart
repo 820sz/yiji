@@ -2,6 +2,21 @@ import 'dart:convert';
 
 import 'package:http/http.dart' as http;
 
+/// 下载 GitHub release 资产时可以借道的中转站。
+///
+/// **为什么需要它们**:用户在国内手机上点内置更新,报「下载不完整
+/// (1418/65274459 字节)」——那是网络层塞回来的一张拦截页,直连 GitHub 的
+/// 资产域名在这类网络下拿不到真文件。服务端本身完全正常(实测 302 到
+/// Azure Blob、`Content-Length: 65274459`),问题只在"从这台设备够不着"。
+///
+/// 这些站点把 `github.com/...` 原样透传,实测返回的字节与直连**逐字节一致**
+/// (前 16 字节三方相同:`50 4B 03 04 ...`)。它们是公开的免费中转,不保证
+/// 长期可靠,所以只作为**候选源之一**,直连仍然是首选——够得着的人不受影响。
+const kGithubMirrors = <String>[
+  'https://ghfast.top/',
+  'https://gh-proxy.com/',
+];
+
 /// 一次可安装的更新。
 class UpdateInfo {
   const UpdateInfo({
@@ -152,11 +167,15 @@ class AppUpdater {
     UpdateInfo info, {
     void Function(double progress)? onProgress,
     void Function(int received, int total)? onBytes,
-    int maxAttempts = 3,
+    int maxAttempts = 6,
   }) async {
     final urls = <String>{
+      // 直连优先:网络通的人就该走最快的那条。
       if (info.downloadUrl.isNotEmpty) info.downloadUrl,
       if (info.apiDownloadUrl.isNotEmpty) info.apiDownloadUrl,
+      // 直连够不着的时候,借道中转站。
+      for (final mirror in kGithubMirrors)
+        if (info.downloadUrl.isNotEmpty) '$mirror${info.downloadUrl}',
     }.toList();
     if (urls.isEmpty) throw UpdateException('这个版本没有可用的下载地址');
 
@@ -177,8 +196,8 @@ class AppUpdater {
       }
     }
     throw UpdateException(
-      '下载失败,试了 $maxAttempts 次。可以换 Wi-Fi 再试,'
-      '或者到 GitHub 的 releases 页面手动下载。($lastError)',
+      '下载失败,直连和几个中转都试过了。可以换 Wi-Fi 或流量再试,'
+      '也可以到 GitHub 的 releases 页面手动下载。($lastError)',
     );
   }
 
@@ -250,9 +269,57 @@ class AppUpdater {
     if (total > 0 && bytes.length < total) {
       throw UpdateException('下载不完整(${bytes.length}/$total 字节)');
     }
+    // 明显太短的一定不对,直接当失败交给上层重试。
+    //
+    // 放在魔数检查之前:一张拦截页只有一两 KB,而真包装得下全世界也不会
+    // 小于 100KB。先按大小挡一道,重试换地址往往就过去了。
+    if (bytes.length < 100 * 1024) {
+      throw UpdateException(
+        '下载回来只有 ${bytes.length} 字节,不像安装包(多半是网络的拦截页)',
+      );
+    }
+    // **内容也要验,不能只看字节数。**
+    //
+    // 用户报过「下载不完整(1418/65274459 字节)」。1418 字节根本不是"断了":
+    // 那是网络层塞回来的一张 **HTML 拦截页**(运营商劫持、公司网关、DNS 劫持
+    // 都会这么干),而它带着自己的 Content-Length 正常结束——于是"字节数够不够"
+    // 这个检查完全看不出问题,一路走到落盘才因为大小不符报错。
+    // 报出来的话还是"下载不完整",看不出真因,用户只会反复点重试。
+    //
+    // APK 就是个 zip,开头必须是 `PK\x03\x04`。这一步能把拦截页、301/302 的
+    // 页面、以及各种"稍后再试"的提示页当场认出来,并给出能照做的提示。
+    if (!_looksLikeApk(bytes)) {
+      final head = _sniff(bytes);
+      throw UpdateException(
+        '下载到的不是安装包(收到 ${bytes.length} 字节,像是网页而不是 APK'
+        '${head.isEmpty ? '' : ':$head'})。'
+        '多半是当前网络的拦截页,换 Wi-Fi 或流量再试,'
+        '也可以到 GitHub 的 releases 页面手动下载。',
+      );
+    }
     onBytes?.call(bytes.length, total);
     onProgress?.call(1);
     return bytes;
+  }
+
+  /// 头几个字节是不是 zip 的魔数。
+  ///
+  /// 用魔数而不是 Content-Type:拦截页也会自称 `application/vnd.android.package-archive`,
+  /// 而魔数没法伪造——内容是 HTML 就是 HTML。
+  static bool _looksLikeApk(List<int> bytes) {
+    return bytes.length >= 4 &&
+        bytes[0] == 0x50 && // P
+        bytes[1] == 0x4B && // K
+        bytes[2] == 0x03 &&
+        bytes[3] == 0x04;
+  }
+
+  /// 从开头抠一小段可读文本,放进错误信息里,一眼看得出收到的是什么。
+  static String _sniff(List<int> bytes) {
+    final text = String.fromCharCodes(
+      bytes.take(120).where((b) => b >= 32 && b < 127),
+    );
+    return text.trim();
   }
 
   void dispose() => _http.close();
