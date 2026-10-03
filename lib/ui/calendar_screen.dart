@@ -19,6 +19,17 @@ class CalendarScreen extends StatefulWidget {
 }
 
 class _CalendarScreenState extends State<CalendarScreen> {
+  /// 换月动画的方向:+1 表示新月份从右边进来(往后翻),-1 从左边。
+  ///
+  /// 方向得由**用户按了哪个箭头**决定,不能从月份大小推——跨年时会推错
+  /// (12 月按"下个月",月份值反而变小)。
+  double _slideFrom = 1;
+
+  void _shift(int months) {
+    setState(() => _slideFrom = months >= 0 ? 1 : -1);
+    AppScope.of(context).shiftCalendarMonth(months);
+  }
+
   @override
   void initState() {
     super.initState();
@@ -55,12 +66,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
               ),
               const Spacer(),
               IconButton(
-                onPressed: () => state.shiftCalendarMonth(-1),
+                onPressed: () => _shift(-1),
                 icon: Icon(Icons.chevron_left, color: textPrimary),
                 tooltip: '上个月',
               ),
               IconButton(
-                onPressed: () => state.shiftCalendarMonth(1),
+                onPressed: () => _shift(1),
                 icon: Icon(Icons.chevron_right, color: textPrimary),
                 tooltip: '下个月',
               ),
@@ -93,26 +104,72 @@ class _CalendarScreenState extends State<CalendarScreen> {
         ),
         const SizedBox(height: 6),
         Expanded(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.fromLTRB(8, 0, 8, 100),
-            child: Column(
-              children: [
-                for (var row = 0; row < cells.length ~/ 7; row++)
-                  Row(
-                    children: [
-                      for (var col = 0; col < 7; col++)
-                        Expanded(
-                          child: _DayCell(
-                            day: cells[row * 7 + col],
-                            isToday: cells[row * 7 + col] == today,
-                            count: state.monthCounts[cells[row * 7 + col]],
-                            dark: dark,
-                            onTap: (day) => showDayEditor(context, day),
+          // 换月时整块网格横向滑出/滑入,方向跟着用户按的箭头走。
+          //
+          // 用户原话:"日历月份切换之间没有动画过渡"。原来是一帧换掉,
+          // 数字变了他也未必注意到。
+          //
+          // 用 AnimatedSwitcher + key 而不是自己管动画:月份是个值,
+          // 值变了就换——这正是 AnimatedSwitcher 的模型,不用手写控制器。
+          child: AnimatedSwitcher(
+            duration: AppTheme.medium,
+            switchInCurve: AppTheme.easeOut,
+            switchOutCurve: AppTheme.easeOut,
+            transitionBuilder: (child, animation) {
+              // 从哪边进来取决于这次是往前还是往后翻,所以读 _slideFrom。
+              final offset = Tween<Offset>(
+                begin: Offset(_slideFrom, 0),
+                end: Offset.zero,
+              ).animate(animation);
+              return ClipRect(
+                child: SlideTransition(
+                  position: offset,
+                  child: FadeTransition(opacity: animation, child: child),
+                ),
+              );
+            },
+            layoutBuilder: (current, previous) => Stack(
+              alignment: Alignment.topCenter,
+              children: [...previous, ?current],
+            ),
+            child: SingleChildScrollView(
+              // key 带上月份:换了月份就是"另一个孩子",AnimatedSwitcher 才会动。
+              key: ValueKey('month-${monthTitle(anchor)}'),
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 100),
+              child: Column(
+                children: [
+                  for (var row = 0; row < cells.length ~/ 7; row++)
+                    Row(
+                      children: [
+                        for (var col = 0; col < 7; col++)
+                          Expanded(
+                            child: _DayCell(
+                              day: cells[row * 7 + col],
+                              isToday: cells[row * 7 + col] == today,
+                              count: state.monthCounts[cells[row * 7 + col]],
+                              hasJournal: state.monthJournals
+                                  .containsKey(cells[row * 7 + col]),
+                              dark: dark,
+                              onTap: (day) => showDayEditor(context, day),
+                            ),
                           ),
-                        ),
-                    ],
-                  ),
-              ],
+                      ],
+                    ),
+                  // 这一月记过的想法汇总在下面。
+                  //
+                  // 用户要求"日历里无法看到记录过的'今日感想'"。做在格子下面
+                  // 而不是塞进格子里:格子里只剩 62 像素,放不下正文,
+                  // 而感想是要读的,不是要一个"有"的标记。
+                  if (state.monthJournals.isNotEmpty) ...[
+                    const SizedBox(height: 14),
+                    _MonthJournalList(
+                      journals: state.monthJournals,
+                      dark: dark,
+                      onTapDay: (day) => showDayEditor(context, day),
+                    ),
+                  ],
+                ],
+              ),
             ),
           ),
         ),
@@ -129,6 +186,7 @@ class _DayCell extends StatelessWidget {
     required this.count,
     required this.dark,
     required this.onTap,
+    this.hasJournal = false,
   });
 
   /// null 表示这一格是月初/月末的占位。
@@ -138,13 +196,16 @@ class _DayCell extends StatelessWidget {
   final bool dark;
   final ValueChanged<String> onTap;
 
+  /// 这天有没有记过"今日想法"。
+  final bool hasJournal;
+
   @override
   Widget build(BuildContext context) {
     final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
     final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
 
     if (day == null) {
-      return const SizedBox(height: 56);
+      return const SizedBox(height: 62);
     }
     final date = parseDayKey(day!);
     final total = count?.total ?? 0;
@@ -155,32 +216,64 @@ class _DayCell extends StatelessWidget {
       onTap: () => onTap(day!),
       borderRadius: BorderRadius.circular(12),
       child: SizedBox(
-        height: 56,
+        height: 62,
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Container(
-              width: 30,
+            // 日期那圈用一个 Stack:今天的高亮圈、以及"记过想法"的小角标
+            // 都挂在它上面。
+            //
+            // 角标**不能加到 Column 里**当第三个孩子——62 的高度已经被
+            // 日期圈(30)+ 间距(2)+ 完成标记(18)= 50 加上居中留白占满了,
+            // 再加一个就溢出(实测报 "overflowed by 1.00 pixels")。
+            // 角标本来就是叠加信息,压在圈上正合适。
+            SizedBox(
+              width: 34,
               height: 30,
-              alignment: Alignment.center,
-              decoration: isToday
-                  ? const BoxDecoration(color: AppTheme.accent, shape: BoxShape.circle)
-                  : null,
-              child: Text(
-                '${date.day}',
-                style: TextStyle(
-                  fontSize: 15,
-                  fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
-                  color: isToday
-                      ? Colors.white
-                      : (future ? textSecondary.withValues(alpha: 0.65) : textPrimary),
-                ),
+              child: Stack(
+                clipBehavior: Clip.none,
+                alignment: Alignment.center,
+                children: [
+                  Container(
+                    width: 30,
+                    height: 30,
+                    alignment: Alignment.center,
+                    decoration: isToday
+                        ? const BoxDecoration(
+                            color: AppTheme.accent,
+                            shape: BoxShape.circle,
+                          )
+                        : null,
+                    child: Text(
+                      '${date.day}',
+                      style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: isToday ? FontWeight.w700 : FontWeight.w500,
+                        color: isToday
+                            ? Colors.white
+                            : (future
+                                ? textSecondary.withValues(alpha: 0.65)
+                                : textPrimary),
+                      ),
+                    ),
+                  ),
+                  if (hasJournal)
+                    Positioned(
+                      right: -1,
+                      top: -1,
+                      child: Icon(
+                        Icons.edit_note,
+                        size: 13,
+                        color: isToday ? Colors.white : AppTheme.accent,
+                      ),
+                    ),
+                ],
               ),
             ),
-            const SizedBox(height: 3),
-            // 状态点:一眼看出这天有没有安排、做完没有。
+            const SizedBox(height: 2),
+            // 完成度标记:一眼看出这天有没有安排、做完没有。
             SizedBox(
-              height: 8,
+              height: 18,
               child: CalendarDayDot(total: total, done: done),
             ),
           ],
@@ -220,23 +313,110 @@ class CalendarDayDot extends StatelessWidget {
   Widget build(BuildContext context) {
     return switch (progress) {
       DayProgress.none => const SizedBox.shrink(),
+      // 尺寸从 12 提到 17。
+      //
+      // 用户原话:"'✓'这种标记太小了"。12 在 1080p 上只有几毫米,
+      // 嵌在日期下面基本看不清是勾还是点——而它承载的是"这天做完了没有"
+      // 这个核心信息,不该省这点地方。
       DayProgress.all => const Icon(
           Icons.check,
-          size: 12,
+          size: 17,
           color: AppTheme.accent,
         ),
       // 半勾:空心勾套一个实心下半部,视觉上就是"勾了一半"。
       DayProgress.half => const Icon(
           Icons.check_circle_outline,
-          size: 12,
+          size: 17,
           color: AppTheme.doneText,
         ),
       DayProgress.few => Icon(
           Icons.close,
-          size: 12,
+          size: 17,
           color: AppTheme.doneText.withValues(alpha: 0.75),
         ),
     };
+  }
+}
+
+/// 这一月记过的"今日想法",按日期列在日历下面。
+///
+/// 用户原话:"日历里,无法看到记录过的'今日感想'"。只给格子点个小点不够
+/// ——想法是要读的,不是要知道"有没有"。所以这里把正文列出来,点一条
+/// 能进那天的编辑页。
+class _MonthJournalList extends StatelessWidget {
+  const _MonthJournalList({
+    required this.journals,
+    required this.dark,
+    required this.onTapDay,
+  });
+
+  /// 键是 `YYYY-MM-DD`,值是那天的想法正文。
+  final Map<String, String> journals;
+  final bool dark;
+  final ValueChanged<String> onTapDay;
+
+  @override
+  Widget build(BuildContext context) {
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    // 按日期倒序:最近写的在最上面。
+    final days = journals.keys.toList()..sort((a, b) => b.compareTo(a));
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Icon(Icons.edit_note, size: 16, color: textSecondary),
+            const SizedBox(width: 6),
+            Text(
+              '这月记的想法(${days.length} 天)',
+              style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+                color: textSecondary,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        for (final day in days)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: InkWell(
+              onTap: () => onTapDay(day),
+              borderRadius: BorderRadius.circular(10),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                decoration: BoxDecoration(
+                  color: dark ? AppTheme.darkSurface : AppTheme.lightSurface,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      shortDateLabel(day),
+                      style: TextStyle(fontSize: 11.5, color: textSecondary),
+                    ),
+                    const SizedBox(height: 3),
+                    Text(
+                      journals[day]!,
+                      // 正文截几行了事:这里是一份"这个月都想了什么"的索引,
+                      // 要能一眼扫过;想看全文点进去。
+                      maxLines: 3,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(fontSize: 13.5, height: 1.5, color: textPrimary),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+      ],
+    );
   }
 }
 

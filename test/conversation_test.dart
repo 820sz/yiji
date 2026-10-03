@@ -340,6 +340,71 @@ void main() {
       expect(dots, isNotEmpty);
       expect(dots.first.progress, DayProgress.all);
     });
+
+    testWidgets('完成标记不能太小', (tester) async {
+      // 用户原话:"'✓'这种标记太小了"。原来是 12,在 1080p 上只有几毫米,
+      // 嵌在日期下面分不清是勾还是点——而它承载的是"这天做完没有"
+      // 这个核心信息。
+      store.seedTask(today, '任务', done: true);
+      await pumpApp(tester, withKey: false);
+      await openTab(tester, '日历');
+
+      final mark = tester.getSize(
+        find
+            .descendant(
+              of: find.byType(CalendarDayDot),
+              matching: find.byType(Icon),
+            )
+            .first,
+      );
+      expect(
+        mark.width,
+        greaterThanOrEqualTo(16),
+        reason: '标记只有 ${mark.width} 像素,太小了',
+      );
+    });
+
+    testWidgets('记过的想法能在日历里看到', (tester) async {
+      // 用户原话:"日历里,无法看到记录过的'今日感想'"。
+      // 只给格子点个小点不够——想法是要读的,所以正文要列出来。
+      await store.saveJournal(today, '今天想通了一件事:情节是为了展现人物。');
+      await pumpApp(tester, withKey: false);
+      await openTab(tester, '日历');
+
+      expect(
+        find.textContaining('情节是为了展现人物'),
+        findsOneWidget,
+        reason: '记录过的想法应当直接显示在日历里,而不是只能点进某一天才看到',
+      );
+      expect(find.textContaining('这月记的想法'), findsOneWidget);
+    });
+
+    testWidgets('没记过想法的月份不显示那一块', (tester) async {
+      await pumpApp(tester, withKey: false);
+      await openTab(tester, '日历');
+      expect(find.textContaining('这月记的想法'), findsNothing);
+    });
+
+    testWidgets('换月有过渡动画,不是一帧换掉', (tester) async {
+      // 用户原话:"日历月份切换之间没有动画过渡"。
+      await pumpApp(tester, withKey: false);
+      await openTab(tester, '日历');
+
+      // AnimatedSwitcher 在换月时会同时挂着新旧两个孩子。
+      expect(find.byType(AnimatedSwitcher), findsWidgets);
+      await tester.tap(find.byTooltip('下个月'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 60));
+
+      // 动画进行中:新旧两个月份同时存在。
+      final switchers = tester.widgetList<AnimatedSwitcher>(
+        find.byType(AnimatedSwitcher),
+      );
+      expect(switchers, isNotEmpty);
+      await tester.pumpAndSettle();
+      // 结束后只剩一个。
+      expect(find.byTooltip('下个月'), findsOneWidget);
+    });
   });
 
   group('没有目标值的推进条', () {

@@ -531,12 +531,23 @@ class AppState extends ChangeNotifier {
   /// 载入某个月的每日计数(用于打点与"全部完成"标记)。
   Future<void> loadCalendarMonth(String monthAnchor) async {
     _calendarMonth = monthAnchor;
-    _monthCounts = await _store.taskCountsByDay(
-      firstDayOfMonth(monthAnchor),
-      lastDayOfMonth(monthAnchor),
-    );
+    final start = firstDayOfMonth(monthAnchor);
+    final end = lastDayOfMonth(monthAnchor);
+    _monthCounts = await _store.taskCountsByDay(start, end);
+    // 这一月的"今日想法"也一起取出来。
+    //
+    // 用户要求日历里能看到记录过的感想。它在日历上是有用的信息:
+    // 光看勾叉只知道"做完了没有",看不到"那天他想了什么"。
+    _monthJournals = {
+      for (final journal in await _store.journalsBetween(start, end))
+        if (journal.text.trim().isNotEmpty) journal.day: journal.text.trim(),
+    };
     notifyListeners();
   }
+
+  /// 当前月份里每天的"今日想法"。键是 `YYYY-MM-DD`。
+  Map<String, String> _monthJournals = const {};
+  Map<String, String> get monthJournals => _monthJournals;
 
   Future<void> shiftCalendarMonth(int delta) {
     final date = parseDayKey(_calendarMonth);
