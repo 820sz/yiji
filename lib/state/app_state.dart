@@ -764,6 +764,9 @@ class AppState extends ChangeNotifier {
         config: aiConfig,
         goals: activeGoals,
         tasks: tasks,
+        // 把"今天"告诉模型:没有它,模型既算不清"这周还剩几天",
+        // 也没法把记录里的日期和"现在"对上(用户报的"没有日期时间变化概念")。
+        today: _currentDay,
         // 边读边把原文交给界面显示。
         //
         // 这里是**节流**的:每来一个分片就 notifyListeners 会把整个进度页

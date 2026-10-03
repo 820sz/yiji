@@ -30,6 +30,7 @@ class GoalMatcher {
     required List<Task> tasks,
     bool suggestNewGoals = true,
     void Function(String partial)? onProgress,
+    String today = '',
   }) async {
     if (tasks.isEmpty) return const GoalMatchResult();
     // 一条目标都没有时更该问"要不要建":这正是新用户第一次同步的情形。
@@ -46,14 +47,36 @@ class GoalMatcher {
                   '| ${goals[i].unit.isEmpty ? '(未定)' : goals[i].unit} '
                   '| ${goals[i].period.label}',
           ].join('\n');
+
+    // 待办**带上日期**。
+    //
+    // 以前每行只有"编号 | 内容",模型完全看不到这件事是哪天做的。
+    // 用户报的两个问题都出在这里:
+    // - "没有日期时间变化概念":它没法判断哪些事属于本周、哪些是上个月的;
+    // - "重复计算已经算过的任务":同一件事在多周的数据里都长一个样,
+    //   它没有任何依据去分辨"这条已经算过了"。
+    // 给上日期,它至少能说清"这是 9 月 25 日做的";再配上下面那条"哪几天"的
+    // 说明,重复计算的余地就小得多。
     final tasksBlock = [
-      for (var i = 0; i < tasks.length; i++) '${i + 1} | ${tasks[i].text}',
+      for (var i = 0; i < tasks.length; i++)
+        '${i + 1} | ${tasks[i].day} | ${tasks[i].text}',
     ].join('\n');
+
+    // 这次读的是哪一段、今天是哪天。
+    //
+    // 缺了这两样,模型既算不出"这周还剩几天",也没法把"今天"和记录对上。
+    final spanDays = _spanOf(tasks);
+    final spanBlock = StringBuffer()
+      ..writeln('这段记录的日期范围:${spanDays.$1} 到 ${spanDays.$2}'
+          '${today.isEmpty ? '' : ';今天是 $today'}')
+      ..writeln('已经确认过、算进过进度的记录**不会出现在下面**,'
+          '所以列表里的每一条都是还没算过的——不要凭记忆去补列表外的量。');
 
     final raw = await _complete(
       config: config,
       goalsBlock: goalsBlock,
       tasksBlock: tasksBlock,
+      spanBlock: spanBlock.toString(),
       suggestNewGoals: suggestNewGoals,
       onProgress: onProgress,
     );
@@ -64,6 +87,17 @@ class GoalMatcher {
       tasks: tasks,
       suggestNewGoals: suggestNewGoals,
     );
+  }
+
+  /// 这批待办覆盖的起止日期。列表非空时两端一定有值。
+  static (String, String) _spanOf(List<Task> tasks) {
+    var earliest = tasks.first.day;
+    var latest = tasks.first.day;
+    for (final task in tasks) {
+      if (task.day.compareTo(earliest) < 0) earliest = task.day;
+      if (task.day.compareTo(latest) > 0) latest = task.day;
+    }
+    return (earliest, latest);
   }
 
   /// 发一次请求并把分片拼成完整回复。
@@ -78,6 +112,7 @@ class GoalMatcher {
     required AiConfig config,
     required String goalsBlock,
     required String tasksBlock,
+    required String spanBlock,
     required bool suggestNewGoals,
     void Function(String partial)? onProgress,
   }) async {
@@ -86,6 +121,7 @@ class GoalMatcher {
         goalMatchPrompt(
           goalsBlock: goalsBlock,
           tasksBlock: tasksBlock,
+          spanBlock: spanBlock,
           suggestNewGoals: suggestNewGoals,
         ),
       ),

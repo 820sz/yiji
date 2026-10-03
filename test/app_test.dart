@@ -441,6 +441,10 @@ void main() {
 
       // 先问"读多久",再开始同步——以前写死本周,攒了几周的人永远读不到。
       expect(find.text('让 AI 读多久的记录?'), findsOneWidget);
+      // 档位变多了("今天" + 五档 + 自选),下面的选项可能在折叠之外,
+      // 所以先滚到它再点。
+      await tester.ensureVisible(find.text('近 14 天'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('近 14 天'));
       await tester.pumpAndSettle();
 
@@ -519,11 +523,21 @@ void main() {
       await tester.tap(find.byIcon(Icons.auto_awesome));
       await tester.pumpAndSettle();
 
-      // 五档范围都在。
-      for (final label in ['本周', '近 7 天', '近 14 天', '近 30 天', '近 90 天']) {
+      // 档位齐全,而且有用户点名要的「今天」和自选起止日期。
+      for (final label in [
+        '今天',
+        '本周',
+        '近 7 天',
+        '近 14 天',
+        '近 30 天',
+        '近 90 天',
+        '自选起止日期',
+      ]) {
         expect(find.text(label), findsOneWidget, reason: '缺少「$label」这一档');
       }
 
+      await tester.ensureVisible(find.text('近 30 天'));
+      await tester.pumpAndSettle();
       await tester.tap(find.text('近 30 天'));
       await tester.pumpAndSettle();
 

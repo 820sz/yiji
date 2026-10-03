@@ -279,6 +279,8 @@ class _SyncRangeSheet extends StatelessWidget {
         dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
 
     final options = <(String, DataRange)>[
+      // 「今天」放第一位:用户明确要过"要能自选,且增加'今天'"。
+      ('今天', DataRange.between(todayKey(), todayKey())),
       ('本周', DataRange.between(mondayOf(todayKey()), sundayOf(todayKey()))),
       ('近 7 天', DataRange.lastDays(7)),
       ('近 14 天', DataRange.lastDays(14)),
@@ -288,7 +290,7 @@ class _SyncRangeSheet extends StatelessWidget {
 
     return SafeArea(
       child: SingleChildScrollView(
-        // 五档 + 标题在小屏上会超出弹层的最大高度(实测溢出 67px),
+        // 档位 + 标题在小屏上会超出弹层的最大高度(实测溢出 67px),
         // 包一层滚动比调高度稳:字号或档位以后变了也不会再撞。
         child: Padding(
           padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
@@ -310,6 +312,43 @@ class _SyncRangeSheet extends StatelessWidget {
                 style: TextStyle(fontSize: 12.5, height: 1.5, color: textSecondary),
               ),
               const SizedBox(height: 8),
+              // 自选任意起止日期。固定档位总有覆盖不到的情况
+              // ("8 月 1 日到 8 月 20 日"这种),用户明确要求能自己选。
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: Icon(Icons.date_range, size: 20, color: AppTheme.accent),
+                title: Text(
+                  '自选起止日期',
+                  style: TextStyle(fontSize: 15, color: textPrimary),
+                ),
+                subtitle: Text(
+                  '在日历上点两个日期',
+                  style: TextStyle(fontSize: 12, color: textSecondary),
+                ),
+                onTap: () async {
+                  final picked = await showDateRangePicker(
+                    context: context,
+                    firstDate: DateTime(2020),
+                    lastDate: DateTime(2100),
+                    helpText: '选择要读的日期范围',
+                    saveText: '就用这段',
+                    initialDateRange: DateTimeRange(
+                      start: DateTime.parse(todayKey()),
+                      end: DateTime.parse(todayKey()),
+                    ),
+                  );
+                  if (picked == null || !context.mounted) return;
+                  Navigator.pop(
+                    context,
+                    DataRange.between(
+                      dayKey(picked.start),
+                      dayKey(picked.end),
+                    ),
+                  );
+                },
+              ),
+              const Divider(height: 8),
               for (final (label, range) in options)
                 ListTile(
                   contentPadding: EdgeInsets.zero,
