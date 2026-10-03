@@ -18,7 +18,7 @@ class AppDatabase {
   /// v2 及以前所有消息混在一条历史里,新开的对话也能"看到"以前聊过的内容,
   /// 表现出来就是 AI 无中生有地提起你从没在这个对话里说过的事。
   /// v3 给消息加上会话归属,并把 `goals.target` 改成可空(推进条可以不预设目标值)。
-  static const _version = 5;
+  static const _version = 6;
 
   /// 打开(必要时创建或升级)数据库。
   ///
@@ -63,6 +63,7 @@ class AppDatabase {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         day TEXT NOT NULL UNIQUE,
         text TEXT NOT NULL,
+        photos TEXT NOT NULL DEFAULT '',
         updated_at INTEGER NOT NULL
       )
     ''');
@@ -256,6 +257,14 @@ class AppDatabase {
       // 会永远留在计数里——用户整理完、确认完,角标还是挂着,怎么都清不掉。
       // 现在改成"还没被处理过的条数",处理过就打上时间戳。
       await db.execute('ALTER TABLE tasks ADD COLUMN synced_at INTEGER');
+    }
+    if (from < 6) {
+      // v6:「今日想法」可以配照片。
+      //
+      // 存的是文件名(换行分隔),不是 base64:照片进了库会让每条日记
+      // 膨胀几百 KB,回看和查库都会变慢。文件走聊天图片那套存储。
+      // 老日记的 photos 是空串,读出来就是"没配图"。
+      await db.execute("ALTER TABLE journals ADD COLUMN photos TEXT NOT NULL DEFAULT ''");
     }
   }
 

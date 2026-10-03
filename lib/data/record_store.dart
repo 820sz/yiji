@@ -69,8 +69,11 @@ abstract class RecordStore {
   /// 区间内所有非空日记,按日期升序。
   Future<List<Journal>> journalsBetween(String startDay, String endDay);
 
-  /// 写入或覆盖某天的想法;写成空白等于删除。
-  Future<void> saveJournal(String day, String text);
+  /// 写入或覆盖某天的想法;写成空白**且没有照片**才等于删除。
+  ///
+  /// [photoRefs] 传 null 表示"不动已有的照片"——只改文字的场景不该
+  /// 顺手把配图抹掉。传空列表才是明确要清空照片。
+  Future<void> saveJournal(String day, String text, {List<String>? photoRefs});
 
   // ---------- 聊天记录 ----------
 

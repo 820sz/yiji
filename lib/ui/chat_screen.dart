@@ -314,6 +314,38 @@ class _ChatScreenState extends State<ChatScreen> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    // 刚进来时看看有没有"今日想法"要分享——有就挂到输入框上方等着发。
+    // 排在下一帧:这时 AppScope 一定可用。
+    WidgetsBinding.instance.addPostFrameCallback((_) => _pickUpStagedShare());
+  }
+
+  /// 把别处暂存的想法挂成待发附件。
+  ///
+  /// 用户要的流程是:想法里点「分享给 AI」→ 选对话 → **附件悬在打字框上方**,
+  /// 他再补充一句需求才发。所以这里只挂附件,不自动发送。
+  void _pickUpStagedShare() {
+    if (!mounted) return;
+    final share = AppScope.of(context).takePendingShare();
+    if (share == null || share.isEmpty) return;
+    setState(() {
+      if (share.text.isNotEmpty) {
+        _attachments.add(
+          ChatAttachment(
+            name: share.text,
+            isImage: false,
+            text: share.text,
+            sizeBytes: share.text.length,
+          ),
+        );
+      }
+      for (final name in share.photos) {
+        // 只记文件名:聊天页在渲染和发送时会按需读字节,
+        // 现在同步读一遍只会把界面卡住。
+        _attachments.add(
+          ChatAttachment(name: name, isImage: true, imageRef: name),
+        );
+      }
+    });
   }
 
   void _onScroll() {
@@ -492,6 +524,15 @@ class _ChatScreenState extends State<ChatScreen> {
       if (_lastConversationId != 0) _rememberScroll(_lastConversationId);
       _lastConversationId = conversationId;
       _restoreScroll(conversationId);
+    }
+
+    // 有新的分享要挂上时补挂一次。
+    //
+    // 聊天页在 IndexedStack 里只构建一次,所以 initState 那一次
+    // 只够第一次分享用;第二次起得靠这里。放在 build 里是安全的:
+    // takePendingShare 会立刻把暂存清空,取完下次重建就什么都不做。
+    if (state.hasPendingShare) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _pickUpStagedShare());
     }
 
     return Scaffold(

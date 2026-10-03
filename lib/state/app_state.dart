@@ -478,9 +478,61 @@ class AppState extends ChangeNotifier {
     unawaited(syncReminders());
   }
 
-  Future<void> saveJournal(String text) async {
-    await _store.saveJournal(_currentDay, text);
+  Future<void> saveJournal(String text, {List<String>? photoRefs}) async {
+    await _store.saveJournal(_currentDay, text, photoRefs: photoRefs);
     await _loadDay();
+    // 日历下面那份"这月记的想法"也要跟着更新,否则刚写完切到日历看不到。
+    await loadCalendarMonth(_calendarMonth);
+  }
+
+  // ---------- 把想法分享到聊天 ----------
+
+  /// 待挂到聊天输入框上方的想法(以及它的照片)。
+  ///
+  /// 用"暂存 + 聊天页取走"而不是直接往聊天页塞:聊天页可能在导航栈里
+  /// 还没被构建,构造参数传不进去;而暂存是纯状态,谁先谁后都不会丢。
+  JournalShare? _pendingShare;
+  JournalShare? takePendingShare() {
+    final share = _pendingShare;
+    _pendingShare = null;
+    return share;
+  }
+
+  /// 有没有等着被挂到聊天输入框上的分享。
+  ///
+  /// 聊天页在 `IndexedStack` 里只构建一次,所以不能只在 initState 里取一次
+  /// ——第二次分享就取不到了。界面靠这个开关在重建时判断要不要再取。
+  bool get hasPendingShare => _pendingShare != null;
+
+  /// 暂存一条要分享给 AI 的想法。聊天页会在下一帧取走并挂成附件。
+  void stageJournalShare({required String text, List<String> photos = const []}) {
+    _pendingShare = JournalShare(text: text.trim(), photos: List.of(photos));
+    notifyListeners();
+  }
+
+  /// 给今天的想法配一张照片。返回是否成功。
+  ///
+  /// 复用聊天图片那套存储:同一个目录、同一套"存文件不存 base64"的规矩,
+  /// 将来分享给 AI 时能直接当附件用,不用再转一道。
+  Future<bool> addJournalPhoto(Uint8List bytes) async {
+    final name = await ChatImages.save(bytes, 'journal.jpg');
+    if (name == null) return false;
+    final existing = await _store.journalOfDay(_currentDay);
+    final photos = [...?existing?.photoRefs, name];
+    await _store.saveJournal(_currentDay, existing?.text ?? '', photoRefs: photos);
+    await _loadDay();
+    await loadCalendarMonth(_calendarMonth);
+    return true;
+  }
+
+  /// 去掉今天想法里的一张照片。
+  Future<void> removeJournalPhoto(String name) async {
+    final existing = await _store.journalOfDay(_currentDay);
+    if (existing == null) return;
+    final photos = existing.photoRefs.where((p) => p != name).toList();
+    await _store.saveJournal(_currentDay, existing.text, photoRefs: photos);
+    await _loadDay();
+    await loadCalendarMonth(_calendarMonth);
   }
 
   /// 把今天没完成的顺延到明天。
@@ -1290,20 +1342,42 @@ class AppState extends ChangeNotifier {
     // user_memes/ 里,也要复制到聊天图片目录才走同一条路。
     final resolved = <ChatAttachment>[];
     for (final file in attachments) {
-      if (!file.isImage || file.imageRef.isNotEmpty || file.imageBytes == null) {
-        resolved.add(file);
+      // 只有文件名、没有字节的图片(比如从"今日想法"分享过来的照片)
+      // 要把字节读出来。**不读的话模型看不到它**——images 列表是按
+      // imageBytes 拼的,只有引用就什么都不会发过去。
+      var current = file;
+      if (file.isImage &&
+          file.imageBytes == null &&
+          file.imageRef.isNotEmpty &&
+          !file.imageRef.startsWith('asset:')) {
+        final bytes = await ChatImages.bytesOf(ChatImage(ref: file.imageRef));
+        if (bytes != null) {
+          current = ChatAttachment(
+            name: file.name,
+            isImage: true,
+            imageBytes: bytes,
+            imageRef: file.imageRef,
+            memeCaption: file.memeCaption,
+            sizeBytes: bytes.length,
+          );
+        }
+      }
+      if (!current.isImage ||
+          current.imageRef.isNotEmpty ||
+          current.imageBytes == null) {
+        resolved.add(current);
         continue;
       }
-      final saved = await ChatImages.save(file.imageBytes!, file.name);
+      final saved = await ChatImages.save(current.imageBytes!, current.name);
       resolved.add(
         saved == null
-            ? file
+            ? current
             : ChatAttachment(
-                name: file.name,
+                name: current.name,
                 isImage: true,
-                imageBytes: file.imageBytes,
+                imageBytes: current.imageBytes,
                 imageRef: saved,
-                sizeBytes: file.sizeBytes,
+                sizeBytes: current.sizeBytes,
               ),
       );
     }
@@ -1654,6 +1728,21 @@ class AppState extends ChangeNotifier {
     _ai.dispose();
     super.dispose();
   }
+}
+
+/// 一条等着挂到聊天输入框上方的心得分享。
+///
+/// 单独一个类型而不是直接传字符串:它还要带着照片一起过去
+/// (用户要求"分享给ai时连照片一并一起")。
+class JournalShare {
+  const JournalShare({required this.text, this.photos = const []});
+
+  final String text;
+
+  /// 照片文件名,存在聊天图片目录里。
+  final List<String> photos;
+
+  bool get isEmpty => text.isEmpty && photos.isEmpty;
 }
 
 /// 头像没能保存。

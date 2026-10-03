@@ -228,14 +228,33 @@ class SqliteRecordStore implements RecordStore {
   }
 
   @override
-  Future<void> saveJournal(String day, String text) async {
-    if (text.trim().isEmpty) {
+  Future<void> saveJournal(
+    String day,
+    String text, {
+    List<String>? photoRefs,
+  }) async {
+    final photos = photoRefs;
+    // 只有"文字空 + 没照片"才等同于删掉这条日记。
+    // 只看文字的话,一条纯配图的日记会被当成空日记删掉。
+    if (text.trim().isEmpty && (photos == null || photos.isEmpty)) {
       await _db.delete('journals', where: 'day = ?', whereArgs: [day]);
       return;
     }
+    // 没传照片时保留原有的,不要把已有配图抹掉
+    // (比如只改文字的场景)。
+    var kept = photos;
+    if (kept == null) {
+      final existing = await journalOfDay(day);
+      kept = existing?.photoRefs ?? const [];
+    }
     await _db.insert(
       'journals',
-      Journal.upsertMap(day: day, text: text.trim(), updatedAt: DateTime.now()),
+      Journal.upsertMap(
+        day: day,
+        text: text.trim(),
+        photoRefs: kept,
+        updatedAt: DateTime.now(),
+      ),
       conflictAlgorithm: ConflictAlgorithm.replace,
     );
   }

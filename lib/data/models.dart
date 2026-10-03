@@ -133,31 +133,50 @@ class Task {
 
 /// 一天的一段想法/收获。一天最多一条。
 class Journal {
-  const Journal({required this.day, required this.text, required this.updatedAt});
+  const Journal({
+    required this.day,
+    required this.text,
+    required this.updatedAt,
+    this.photoRefs = const [],
+  });
 
   final String day;
   final String text;
   final DateTime updatedAt;
 
+  /// 配的照片,存的是聊天图片目录里的文件名。
+  ///
+  /// 复用聊天那套存储(见 `ChatImages`)而不是另起一份:同一个目录、
+  /// 同一套"存文件不存 base64"的规矩,分享给 AI 时也能直接当附件用。
+  final List<String> photoRefs;
+
+  /// 判空用:没写文字、也没配照片,才算没记。
+  bool get isEmpty => text.trim().isEmpty && photoRefs.isEmpty;
+
   factory Journal.fromMap(Map<String, Object?> map) {
+    final raw = (map['photos'] as String?) ?? '';
     return Journal(
       day: map['day'] as String,
       text: map['text'] as String,
       updatedAt: DateTime.fromMillisecondsSinceEpoch(map['updated_at'] as int),
+      photoRefs: [
+        for (final name in raw.split('\n'))
+          if (name.trim().isNotEmpty) name.trim(),
+      ],
     );
   }
-
-  /// 判空用:只有空白字符的日记等同没写。
-  bool get isEmpty => text.trim().isEmpty;
 
   static Map<String, Object?> upsertMap({
     required String day,
     required String text,
     required DateTime updatedAt,
+    List<String> photoRefs = const [],
   }) {
     return {
       'day': day,
       'text': text,
+      // 换行分隔:文件名里不会出现换行,这个格式够用、而且人能直接读懂。
+      'photos': photoRefs.join('\n'),
       'updated_at': updatedAt.millisecondsSinceEpoch,
     };
   }

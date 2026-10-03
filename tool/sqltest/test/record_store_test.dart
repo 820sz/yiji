@@ -1209,6 +1209,137 @@ void main() {
     });
   });
 
+  group('v5 升级到 v6 不丢数据', () {
+    /// v6 给 journals 加了 photos(今日想法可以配照片)。
+    ///
+    /// 对老库有一个必须成立的约定:老日记**还在**,而且 photos 是空串
+    /// ——读出来就是"没配图",不能变成 null 让上层崩。
+    test('老日记都在,photos 补成空串', () async {
+      final dir = await Directory.systemTemp.createTemp('yiji_v5_to_v6');
+      final path = p.join(dir.path, 'yiji.db');
+      addTearDown(() => dir.delete(recursive: true));
+
+      // 第一步:按 v5 的结构建库(journals 没有 photos)。
+      final old = await databaseFactory.openDatabase(path);
+      await old.execute('''
+        CREATE TABLE tasks (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          day TEXT NOT NULL, text TEXT NOT NULL,
+          done INTEGER NOT NULL DEFAULT 0, completed_at INTEGER,
+          sort_order INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
+          color TEXT NOT NULL DEFAULT 'blue', outcome TEXT NOT NULL DEFAULT '',
+          synced_at INTEGER
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE journals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, day TEXT NOT NULL UNIQUE,
+          text TEXT NOT NULL, updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE conversations (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL DEFAULT '',
+          avatar TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE messages (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, conversation_id INTEGER NOT NULL,
+          role TEXT NOT NULL, content TEXT NOT NULL,
+          reasoning TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE goals (
+          id INTEGER PRIMARY KEY AUTOINCREMENT, title TEXT NOT NULL,
+          unit TEXT NOT NULL DEFAULT '', target REAL, period TEXT NOT NULL,
+          direction TEXT NOT NULL DEFAULT 'increase',
+          color TEXT NOT NULL DEFAULT 'blue', active INTEGER NOT NULL DEFAULT 1,
+          start_day TEXT, end_day TEXT, created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE progress_entries (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          goal_id INTEGER NOT NULL, amount REAL NOT NULL, day TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', task_id INTEGER,
+          source TEXT NOT NULL DEFAULT 'manual', created_at INTEGER NOT NULL
+        )
+      ''');
+      await old.execute('''
+        CREATE TABLE reminders (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id INTEGER NOT NULL, day TEXT NOT NULL, at TEXT NOT NULL,
+          note TEXT NOT NULL DEFAULT '', created_at INTEGER NOT NULL
+        )
+      ''');
+
+      await old.insert('journals', {
+        'day': '2026-09-25',
+        'text': 'v5 时代记的想法',
+        'updated_at': DateTime(2026, 9, 25).millisecondsSinceEpoch,
+      });
+      await old.setVersion(5);
+      await old.close();
+
+      final upgraded = await AppDatabase.open(path: path);
+      addTearDown(upgraded.close);
+      final migrated = SqliteRecordStore(upgraded.db);
+
+      final journal = await migrated.journalOfDay('2026-09-25');
+      expect(journal, isNotNull);
+      expect(journal!.text, 'v5 时代记的想法');
+      expect(journal.photoRefs, isEmpty, reason: '老日记没有照片,读出来该是空');
+
+      // 新列真的能用。
+      await migrated.saveJournal(
+        '2026-09-25',
+        'v5 时代记的想法',
+        photoRefs: const ['a.png'],
+      );
+      final updated = await migrated.journalOfDay('2026-09-25');
+      expect(updated!.photoRefs, ['a.png']);
+    });
+
+    test('只有照片、没有文字的想法,不会被当成空日记删掉', () async {
+      // 语义变化:v6 之前"空白即删除",有了照片之后这条不成立——
+      // 一条纯配图的日记是完整的一条日记。
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      await store.saveJournal('2026-09-25', '', photoRefs: const ['a.png']);
+      final journal = await store.journalOfDay('2026-09-25');
+      expect(journal, isNotNull, reason: '配了图的日记不该被删掉');
+      expect(journal!.photoRefs, ['a.png']);
+    });
+
+    test('只改文字不会抹掉已有照片', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      await store.saveJournal('2026-09-25', '原文', photoRefs: const ['a.png']);
+      // photoRefs 不传 = 不动照片。
+      await store.saveJournal('2026-09-25', '改了文字');
+      final journal = await store.journalOfDay('2026-09-25');
+      expect(journal!.text, '改了文字');
+      expect(journal.photoRefs, ['a.png'], reason: '改文字不该顺手删照片');
+    });
+
+    test('文字和照片都清空时才真的删掉', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      await store.saveJournal('2026-09-25', '原文', photoRefs: const ['a.png']);
+      await store.saveJournal('2026-09-25', '', photoRefs: const []);
+      expect(await store.journalOfDay('2026-09-25'), isNull);
+    });
+  });
+
   group('待同步计数', () {
     test('没有进度记录的事,标记后也不再计入', () async {
       // 「取快递」永远匹配不上推进条,所以它永远没有进度记录。

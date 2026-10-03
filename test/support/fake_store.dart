@@ -289,30 +289,53 @@ class FakeStore implements RecordStore {
   @override
   Future<Journal?> journalOfDay(String day) async {
     final text = _journals[day];
-    return text == null
-        ? null
-        : Journal(day: day, text: text, updatedAt: DateTime(2026, 9, 14, 22, 0));
+    final photos = _journalPhotos[day];
+    // 只要文字或照片有一个在,这条日记就存在。
+    if (text == null && (photos == null || photos.isEmpty)) return null;
+    return Journal(
+      day: day,
+      text: text ?? '',
+      photoRefs: photos ?? const [],
+      updatedAt: DateTime(2026, 9, 14, 22, 0),
+    );
   }
 
   @override
   Future<List<Journal>> journalsBetween(String startDay, String endDay) async {
-    final days = _journals.keys
+    final days = <String>{..._journals.keys, ..._journalPhotos.keys}
         .where((d) => d.compareTo(startDay) >= 0 && d.compareTo(endDay) <= 0)
         .toList()
       ..sort();
-    return days
-        .map((d) => Journal(day: d, text: _journals[d]!, updatedAt: DateTime(2026, 9, 14)))
-        .toList();
+    return [
+      for (final d in days)
+        Journal(
+          day: d,
+          text: _journals[d] ?? '',
+          photoRefs: _journalPhotos[d] ?? const [],
+          updatedAt: DateTime(2026, 9, 14),
+        ),
+    ];
   }
 
   @override
-  Future<void> saveJournal(String day, String text) async {
-    if (text.trim().isEmpty) {
+  Future<void> saveJournal(
+    String day,
+    String text, {
+    List<String>? photoRefs,
+  }) async {
+    // 和生产实现同一套语义:文字空**且没照片**才算删除;
+    // photoRefs 为 null 表示不动已有的照片。
+    final photos = photoRefs ?? _journalPhotos[day] ?? const <String>[];
+    if (text.trim().isEmpty && photos.isEmpty) {
       _journals.remove(day);
+      _journalPhotos.remove(day);
     } else {
       _journals[day] = text.trim();
+      _journalPhotos[day] = List.of(photos);
     }
   }
+
+  final Map<String, List<String>> _journalPhotos = {};
 
   @override
   Future<List<Conversation>> conversations() async {

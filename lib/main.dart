@@ -84,8 +84,39 @@ class HomeShell extends StatefulWidget {
   State<HomeShell> createState() => _HomeShellState();
 }
 
+/// 请求切到某个 tab。
+///
+/// "今日想法"要跳到聊天去分享,而它是任务页里的一个卡片、和 HomeShell
+/// 隔了好几层,把"切 tab"当回调一路传下去会污染一堆构造参数。
+/// 用一个全局通知:谁想跳就写一下,HomeShell 接住。
+final ValueNotifier<int> tabRequest = ValueNotifier<int>(0);
+
+/// 「聊天」在底部导航里的下标。
+const int chatTabIndex = 3;
+
+/// 跳到聊天页。
+void toChatTab() => tabRequest.value = chatTabIndex;
+
 class _HomeShellState extends State<HomeShell> {
   int _index = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    // 别的页面(比如"今日想法"的分享)想跳过来时,在这里接。
+    tabRequest.addListener(_onTabRequest);
+  }
+
+  @override
+  void dispose() {
+    tabRequest.removeListener(_onTabRequest);
+    super.dispose();
+  }
+
+  void _onTabRequest() {
+    if (!mounted) return;
+    setState(() => _index = tabRequest.value);
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 
 import '../core/day.dart';
+import '../data/chat_images.dart';
 import '../data/models.dart';
 import '../state/app_state.dart';
 import 'ai_avatar.dart';
@@ -824,6 +827,51 @@ class _JournalCard extends StatelessWidget {
                   color: hasContent ? textPrimary : textSecondary,
                 ),
               ),
+              // 配的照片也露出来。用户要求"今日想法支持补充照片"——
+              // 存了却在卡片上看不见,他会以为没存上。
+              if (journal != null && journal!.photoRefs.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                SizedBox(
+                  height: 64,
+                  child: ListView(
+                    scrollDirection: Axis.horizontal,
+                    children: [
+                      for (final name in journal!.photoRefs)
+                        Padding(
+                          padding: const EdgeInsets.only(right: 8),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: SizedBox(
+                              width: 64,
+                              height: 64,
+                              child: FutureBuilder<File?>(
+                                future: ChatImages.file(name),
+                                builder: (context, snapshot) {
+                                  final stored = snapshot.data;
+                                  if (stored == null) {
+                                    return const ColoredBox(
+                                      color: Colors.black12,
+                                      child: Icon(Icons.image_outlined, size: 18),
+                                    );
+                                  }
+                                  return Image.file(
+                                    stored,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stack) =>
+                                        const ColoredBox(
+                                      color: Colors.black12,
+                                      child: Icon(Icons.image_outlined, size: 18),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  ),
+                ),
+              ],
             ],
           ),
         ),

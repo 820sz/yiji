@@ -1,11 +1,16 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../core/day.dart';
+import '../data/chat_images.dart';
 import '../data/models.dart';
 import '../data/palette.dart';
 import '../data/record_store.dart';
 import '../data/reminder.dart';
+import '../main.dart';
 import '../state/app_state.dart';
 import 'task_card.dart';
 import 'theme.dart';
@@ -557,28 +562,156 @@ class _DayEditorSheetState extends State<_DayEditorSheet> {
 }
 
 /// 想法/收获的编辑器。想法通常比待办长,给足空间。
-Future<void> showJournalEditor(BuildContext context, String day, String initial) async {
+///
+/// 右上角有「分享给 AI」:把这条想法(连同配的照片)挂到聊天输入框上方,
+/// 用户可以补充一句需求再发出去——用户明确要求过这个流程。
+Future<void> showJournalEditor(
+  BuildContext context,
+  String day,
+  String initial,
+) async {
   final state = AppScope.of(context);
-  final result = await Navigator.of(context).push<String>(
+  final result = await Navigator.of(context).push<JournalEditorResult>(
     MaterialPageRoute(
       builder: (context) => _JournalEditorPage(
         title: '${shortDateLabel(day)}的想法',
         initial: initial,
+        initialPhotos: state.dayJournal?.photoRefs ?? const [],
       ),
     ),
   );
-  if (result != null) {
-    // 编辑器只对"当前查看的那天"生效;从日历进来时先切过去,避免写错天。
-    if (day != state.currentDay) await state.goToDay(day);
-    await state.saveJournal(result);
+  if (result == null) return;
+
+  // 编辑器只对"当前查看的那天"生效;从日历进来时先切过去,避免写错天。
+  if (day != state.currentDay) await state.goToDay(day);
+  await state.saveJournal(result.text, photoRefs: result.photoRefs);
+
+  // 分享是在**保存之后**做的,这样聊天里挂的就是刚写下的版本。
+  if (result.shareToAi && context.mounted) {
+    await shareJournalToChat(
+      context,
+      text: result.text,
+      photoRefs: result.photoRefs,
+    );
+  }
+}
+
+/// 编辑器返回的东西:改了内容,以及用户有没有按"分享给 AI"。
+class JournalEditorResult {
+  const JournalEditorResult({
+    required this.text,
+    required this.photoRefs,
+    this.shareToAi = false,
+  });
+
+  final String text;
+  final List<String> photoRefs;
+  final bool shareToAi;
+}
+
+/// 把一条想法(连同照片)交给聊天页,挂在输入框上方等用户补充需求。
+///
+/// 先让用户选**发给哪个对话**——用户明确要求"自选分享的 ai 聊天对象"。
+/// 对象列表就是侧边栏里那些会话,选完跳过去、把附件挂上。
+Future<void> shareJournalToChat(
+  BuildContext context, {
+  required String text,
+  List<String> photoRefs = const [],
+}) async {
+  final state = AppScope.of(context);
+  toChatTab();
+
+  final target = await showModalBottomSheet<int>(
+    context: context,
+    useSafeArea: true,
+    builder: (context) => _ShareTargetSheet(conversations: state.conversations),
+  );
+  if (target == null) return;
+
+  // 选的是"新对话"时 id 为 0,由聊天页按当前会话处理。
+  if (target != 0) await state.openConversation(target);
+  state.stageJournalShare(text: text, photos: photoRefs);
+}
+
+/// 选分享给哪个对话。
+class _ShareTargetSheet extends StatelessWidget {
+  const _ShareTargetSheet({required this.conversations});
+
+  final List<Conversation> conversations;
+
+  @override
+  Widget build(BuildContext context) {
+    final dark = Theme.of(context).brightness == Brightness.dark;
+    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary =
+        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+
+    return SafeArea(
+      child: SingleChildScrollView(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(18, 16, 18, 12),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '分享给哪个对话?',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.w600,
+                  color: textPrimary,
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                '这个想法会挂在输入框上方,你可以再补充一句需求再发。',
+                style: TextStyle(fontSize: 12.5, height: 1.5, color: textSecondary),
+              ),
+              const SizedBox(height: 8),
+              for (final conversation in conversations)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  leading: const Icon(Icons.chat_bubble_outline, size: 19),
+                  title: Text(
+                    conversation.title.trim().isEmpty
+                        ? '未命名对话'
+                        : conversation.title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 15, color: textPrimary),
+                  ),
+                  onTap: () => Navigator.pop(context, conversation.id),
+                ),
+              const Divider(height: 8),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                leading: const Icon(Icons.add_comment_outlined, size: 19),
+                title: Text(
+                  '开一个新对话',
+                  style: TextStyle(fontSize: 15, color: textPrimary),
+                ),
+                onTap: () => Navigator.pop(context, 0),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
 }
 
 class _JournalEditorPage extends StatefulWidget {
-  const _JournalEditorPage({required this.title, required this.initial});
+  const _JournalEditorPage({
+    required this.title,
+    required this.initial,
+    this.initialPhotos = const [],
+  });
 
   final String title;
   final String initial;
+  final List<String> initialPhotos;
 
   @override
   State<_JournalEditorPage> createState() => _JournalEditorPageState();
@@ -588,11 +721,44 @@ class _JournalEditorPageState extends State<_JournalEditorPage> {
   // controller 由页面自己持有并释放。以前是外面建好传进来、await 之后 dispose,
   // 而那个 future 在 pop 的瞬间就完成了——页面还在跑退场动画、还在读它。
   late final _controller = TextEditingController(text: widget.initial);
+  late final List<String> _photos = List.of(widget.initialPhotos);
+  bool _picking = false;
 
   @override
   void dispose() {
     _controller.dispose();
     super.dispose();
+  }
+
+  /// 选一张照片配上。用户要求"今日想法支持补充照片"。
+  Future<void> _addPhoto() async {
+    if (_picking) return;
+    setState(() => _picking = true);
+    try {
+      final file = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 88,
+      );
+      if (file == null || !mounted) return;
+      final bytes = await file.readAsBytes();
+      // 先落盘再记文件名:消息里存 base64 会让日记膨胀。
+      final name = await ChatImages.save(bytes, file.name);
+      if (!mounted) return;
+      if (name == null) {
+        ScaffoldMessenger.of(context)
+            .showSnackBar(const SnackBar(content: Text('这张照片没存上,再试一次')));
+        return;
+      }
+      setState(() => _photos.add(name));
+    } on Exception catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text('选图失败:$error')));
+    } finally {
+      if (mounted) setState(() => _picking = false);
+    }
   }
 
   @override
@@ -601,26 +767,144 @@ class _JournalEditorPageState extends State<_JournalEditorPage> {
       appBar: AppBar(
         title: Text(widget.title),
         actions: [
+          // 分享给 AI:把想法(连同照片)挂到聊天输入框上方。
+          IconButton(
+            onPressed: () => Navigator.pop(
+              context,
+              JournalEditorResult(
+                text: _controller.text,
+                photoRefs: _photos,
+                shareToAi: true,
+              ),
+            ),
+            icon: const Icon(Icons.ios_share),
+            tooltip: '分享给 AI',
+          ),
           TextButton(
-            onPressed: () => Navigator.pop(context, _controller.text),
+            onPressed: () => Navigator.pop(
+              context,
+              JournalEditorResult(text: _controller.text, photoRefs: _photos),
+            ),
             child: const Text('保存'),
           ),
         ],
       ),
-      body: Padding(
-        padding: const EdgeInsets.all(16),
-        child: TextField(
-          controller: _controller,
-          autofocus: true,
-          maxLines: null,
-          expands: true,
-          textAlignVertical: TextAlignVertical.top,
-          keyboardType: TextInputType.multiline,
-          style: const TextStyle(fontSize: 15.5, height: 1.65),
-          decoration: const InputDecoration(
-            hintText: '今天读到、想到、练到了什么',
+      body: Column(
+        children: [
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+              child: TextField(
+                controller: _controller,
+                autofocus: true,
+                maxLines: null,
+                expands: true,
+                textAlignVertical: TextAlignVertical.top,
+                keyboardType: TextInputType.multiline,
+                style: const TextStyle(fontSize: 15.5, height: 1.65),
+                decoration: const InputDecoration(
+                  hintText: '今天读到、想到、练到了什么',
+                ),
+              ),
+            ),
           ),
-        ),
+          // 配的照片横排,可以逐张去掉。
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 14),
+            child: SizedBox(
+              height: 76,
+              child: ListView(
+                scrollDirection: Axis.horizontal,
+                children: [
+                  for (final name in _photos)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Stack(
+                        clipBehavior: Clip.none,
+                        children: [
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(10),
+                            child: SizedBox(
+                              width: 70,
+                              height: 70,
+                              child: FutureBuilder<File?>(
+                                future: ChatImages.file(name),
+                                builder: (context, snapshot) {
+                                  final stored = snapshot.data;
+                                  if (stored == null) {
+                                    return const ColoredBox(
+                                      color: Colors.black12,
+                                      child: Icon(Icons.image_outlined, size: 20),
+                                    );
+                                  }
+                                  return Image.file(
+                                    stored,
+                                    fit: BoxFit.cover,
+                                    errorBuilder: (context, error, stack) =>
+                                        const ColoredBox(
+                                      color: Colors.black12,
+                                      child: Icon(Icons.image_outlined, size: 20),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                          Positioned(
+                            right: -6,
+                            top: -6,
+                            child: InkWell(
+                              onTap: () => setState(() => _photos.remove(name)),
+                              customBorder: const CircleBorder(),
+                              child: Container(
+                                width: 22,
+                                height: 22,
+                                decoration: BoxDecoration(
+                                  color: Theme.of(context).colorScheme.surface,
+                                  shape: BoxShape.circle,
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: Colors.black.withValues(alpha: 0.18),
+                                      blurRadius: 4,
+                                    ),
+                                  ],
+                                ),
+                                child: const Icon(Icons.close, size: 14),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  // 添加入口放在队尾,顺着照片往后找就行。
+                  InkWell(
+                    onTap: _picking ? null : _addPhoto,
+                    borderRadius: BorderRadius.circular(10),
+                    child: Container(
+                      width: 70,
+                      height: 70,
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(
+                          color: Theme.of(context).dividerColor,
+                        ),
+                      ),
+                      child: _picking
+                          ? const Center(
+                              child: SizedBox(
+                                width: 18,
+                                height: 18,
+                                child: CircularProgressIndicator(strokeWidth: 2),
+                              ),
+                            )
+                          : const Icon(Icons.add_a_photo_outlined, size: 22),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
