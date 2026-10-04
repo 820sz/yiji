@@ -1,7 +1,7 @@
 ﻿name: yiji
 description: "忆记 — 每日待办、想法、进度推进条、周报月报,加一个自己配 key 的 AI 聊天窗口。"
 publish_to: 'none'
-version: 1.1.6+18
+version: 1.1.7+19
 
 environment:
   sdk: ^3.12.2

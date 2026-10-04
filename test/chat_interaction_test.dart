@@ -192,6 +192,64 @@ void main() {
     expect(urls.first.length, greaterThan(200), reason: '应当真的带上图的字节');
   });
 
+  testWidgets('发完之后列表还能往上翻,不会被拽回底部', (tester) async {
+    // **这是"聊天栏锁死在最底层"的回归测试。**
+    // 上一轮我让程序化的 jumpTo 也能重置"跟底"状态,形成死循环:
+    // 贴底 → 位置在底部 → 状态变回该跟底 → 再贴底。用户怎么划都被拽回去。全部塞进**同一个**对话,
+    // 而且要在 openTab 之前:app 打开时会挑一个有效会话。
+    final conversationId = await store.createConversation(title: '长对话');
+    for (var i = 0; i < 40; i++) {
+      await store.addMessage(conversationId, 'user', '第 $i 条消息');
+    }
+    await pumpApp(tester);
+    await openTab(tester, '聊天');
+    await tester.pumpAndSettle();
+
+    // 先确认列表确实有得滚(否则这条测试什么也证明不了)。
+    final list = find.byType(Scrollable).first;
+    final controller =
+        tester.widget<ListView>(find.byType(ListView)).controller!;
+    expect(
+      controller.position.maxScrollExtent,
+      greaterThan(100),
+      reason: '测试前提:列表要足够长,能滚',
+    );
+
+    // 发一条,触发"贴底"那条逻辑。
+    await tester.enterText(find.widgetWithText(TextField, '说点什么'), '再来一条');
+    await tester.tap(find.byIcon(Icons.arrow_upward));
+    await tester.pumpAndSettle();
+
+    final atBottom = controller.position.pixels;
+
+    // 往上滑一段:**按住不放**,同时让内容继续变长(流式输出就是这样的)。
+    // 只滑一下是测不出来的——必须让"内容还在长"这个条件成立,
+    // 因为那个死循环正是靠"变长 → 贴底"这一步把用户拽回去的。
+    final gesture = await tester.startGesture(
+      tester.getCenter(list),
+    );
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+    await gesture.moveBy(const Offset(0, 120));
+    await tester.pump();
+
+    // 手指还按着的时候,来了一条新消息(等价于流式分片到达)。
+    for (var i = 0; i < 5; i++) {
+      await store.addMessage(conversationId, 'assistant', '流式 $i');
+      await tester.pump();
+    }
+
+    await gesture.up();
+    await tester.pumpAndSettle();
+
+    expect(
+      controller.position.pixels,
+      lessThan(atBottom - 50),
+      reason: '往上翻的时候内容还在长,位置不该被拽回底部'
+          '(在底部时 $atBottom,现在 ${controller.position.pixels})',
+    );
+  });
+
   testWidgets('弹层点空白处能关掉,而且不会跳到别的页签', (tester) async {
     // 同一个根因的连带伤害:根路由上的 PopScope 把所有"程序化 pop"都当成
     // 返回键,于是弹层点空白处关不掉、反而先跳回任务页。

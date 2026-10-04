@@ -90,7 +90,7 @@ void main() {
             find.byType(RawImage).evaluate().isNotEmpty,
         isTrue,
         reason: 'caption「${sample.caption}」没有渲染出任何图片'
-            '(引用是 ${parsed!.ref})',
+            '(引用是 ${parsed.ref})',
       );
     }
   });

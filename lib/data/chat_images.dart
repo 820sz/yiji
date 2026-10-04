@@ -552,12 +552,14 @@ class ChatImages {
 
   /// 取一张图的原始字节:内置的走 asset,用户自添加的走磁盘。
   ///
-  /// 磁盘文件找不到时**回退到内置图库的同名图**。
+  /// 磁盘文件找不到时**回退到图库里的同一张**。
   ///
-  /// 这条回退是给老消息用的:以前内置表情包会被抄一份到私有目录、
-  /// 消息里记那个文件名;那份文件被系统清掉之后,那条消息就永远显示
-  /// "图不在了",而同一张图明明就在安装包里。现在按文件名回查一次图库,
-  /// 老消息自己就好了——用户不用做任何事。
+  /// **三个地方都要查**,少一个就会出现"图和库都在、引用也对,却显示图不在了":
+  /// 1. 聊天图片目录(`chat_images/`)——用户发的照片在这里;
+  /// 2. **用户表情包目录**(`user_memes/`)——用户自己加的图在这里,
+  ///    它和聊天目录是两回事,以前这条回退只查了聊天目录,所以
+  ///    自带表情包失败了就永远救不回来;
+  /// 3. 安装包内的内置图——按文件名回查索引。
   static Future<Uint8List?> bytesOf(ChatImage image) async {
     try {
       if (image.isAsset) {
@@ -567,7 +569,21 @@ class ChatImages {
       final onDisk = await file(image.fileName);
       final bytes = await onDisk?.readAsBytes();
       if (bytes != null && bytes.isNotEmpty) return bytes;
-      return await _builtinFallback(image.fileName);
+      return await _userMemeBytes(image.fileName) ??
+          await _builtinFallback(image.fileName);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// 从用户表情包目录里按文件名取字节。
+  static Future<Uint8List?> _userMemeBytes(String fileName) async {
+    try {
+      final dir = await userMemeDir();
+      final target = File(p.join(dir.path, fileName));
+      if (!await target.exists()) return null;
+      final bytes = await target.readAsBytes();
+      return bytes.isEmpty ? null : bytes;
     } catch (_) {
       return null;
     }

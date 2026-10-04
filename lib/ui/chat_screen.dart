@@ -4,7 +4,6 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
-import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -369,22 +368,33 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  /// 用户是不是**自己**在往上翻。
+  /// 用户动了列表:更新"离底部多远",并决定还要不要跟底。
   ///
-  /// 用 `dragDetails != null` 判断"这次滚动是手指带的":只有用户的手势
-  /// 才有资格改变"要不要跟底"。用位置判断的话,`jumpTo` 自己触发的滚动
-  /// 也会被当成用户操作——上一轮就是这么坏掉的:用户往上滑 → 被拽回底部 →
-  /// 位置又变成"在底部" → 状态重置成"该跟底" → 下一次继续拽,
-  /// 形成**回弹锁**,观感就是"卡死划不动"。
+  /// 判据只看两件事,而且都是**客观事实**,不猜意图:
+  /// - 这次滚动是不是手指带的(`dragDetails != null`);
+  /// - 手指松开时离底部多远。
+  ///
+  /// 程序化的 `jumpTo` 既不会带来 `dragDetails`,也不会把 `_followBottom`
+  /// 打开——所以"贴底 → 位置变成在底部 → 状态重置 → 再贴底"这个死循环
+  /// 从结构上就不可能出现。上一轮就是因为让 jumpTo 也能改状态,
+  /// 才把列表锁死在底部的。
   bool _onScrollStart(ScrollStartNotification notification) {
     if (notification.dragDetails != null) {
       _userDragging = true;
+      // **手指一碰就停止自动跟底**,不要再抢用户的滚动。
+      // 他松手时到底了,才会重新跟上。
+      _followBottom = false;
     }
     return false;
   }
 
   bool _onScrollEnd(ScrollEndNotification notification) {
+    if (!_userDragging) return false;
     _userDragging = false;
+    if (!_scroll.hasClients) return false;
+    final position = _scroll.position;
+    // 松手时已经在底部附近:重新跟上后续的新消息。
+    _followBottom = position.maxScrollExtent - position.pixels <= 80;
     return false;
   }
 
@@ -393,15 +403,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final position = _scroll.position;
     // 往上留一点余量:刚到底部时按钮不该闪出来。
     final away = position.maxScrollExtent - position.pixels > 80;
-    // **只有手指能把"跟底"重新打开。**
-    //
-    // 这个 && _userDragging 是关键:程序化的 jumpTo 也会走到这里,
-    // 如果它能把 _followBottom 置回 true,就形成死循环——
-    // 贴底 → 回弹 → 位置在底部 → 状态变回"该跟底" → 再贴底,
-    // 用户看到的是一条**锁死在底部、怎么划都弹回去**的列表。
-    if (_userDragging) {
-      _followBottom = !away;
-    }
     if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
   }
 
@@ -412,8 +413,8 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 可新消息是在之后的状态更新里才进列表的,那一帧的 `maxScrollExtent`
   /// 还是旧值——滚过去等于没动,新消息就落在屏幕外。
   ///
-  /// 判断"内容变高"要靠 [ScrollMetricsNotification] 而不是控制器监听:
-  /// 列表变长时滚动位置没变,控制器的监听器根本不会被调用。
+  /// 用 [ScrollMetricsNotification] 而不是控制器监听:列表变长时滚动位置
+  /// 没变,控制器的监听器根本不会被调用。
   bool _onMetrics(ScrollMetricsNotification notification) {
     // **只看外层列表。**
     //
@@ -424,18 +425,6 @@ class _ChatScreenState extends State<ChatScreen> {
     final metrics = notification.metrics;
     // 已经在底部就不用动。
     if (metrics.pixels >= metrics.maxScrollExtent - 2) return false;
-    // 外面还套着一帧布局(比如键盘弹起)时不要抢:位置会在一帧内再变,
-    // 这时跳过去还得再跳一次,连起来就是抖。
-    if (SchedulerBinding.instance.schedulerPhase ==
-        SchedulerPhase.persistentCallbacks) {
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || !_scroll.hasClients || !_followBottom) return;
-        final position = _scroll.position;
-        if (position.pixels >= position.maxScrollExtent - 2) return;
-        _scroll.jumpTo(position.maxScrollExtent);
-      });
-      return false;
-    }
     _scroll.jumpTo(metrics.maxScrollExtent);
     return false;
   }
@@ -1814,7 +1803,11 @@ class _MessageImage extends StatelessWidget {
     // 这种安装包里根本不存在的路径)。只要图还在库里,就该把它画出来,
     // 而不是给用户看一个"图不在了"——那等于把他的历史永久弄坏。
     final source = image.isAsset
-        ? _AssetImage(assetPath: image.assetPath, fileName: image.fileName)
+        ? _AssetImage(
+            assetPath: image.assetPath,
+            fileName: image.fileName,
+            rawRef: image.ref,
+          )
         : _DiskImage(fileName: image.fileName);
 
     // 尺寸按来源分档。
@@ -1832,7 +1825,9 @@ class _MessageImage extends StatelessWidget {
         child: GestureDetector(
           onTap: () => _openFullScreen(context, image),
           child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: limit, maxWidth: limit),
+            // 只限宽:**不限高**。占位框里要放诊断文字,给死高度就会溢出。
+            // 图本身的高度由它自己的宽高比决定,不会失控。
+            constraints: BoxConstraints(maxWidth: limit),
             child: source,
           ),
         ),
@@ -1847,10 +1842,18 @@ class _MessageImage extends StatelessWidget {
 /// 消息里的引用可能来自任何历史版本。只认一条精确路径的话,当年写错的那种
 /// 引用就永远显示"图不在了"——而图其实好好躺在图库里或磁盘上。
 class _AssetImage extends StatefulWidget {
-  const _AssetImage({required this.assetPath, required this.fileName});
+  const _AssetImage({
+    required this.assetPath,
+    required this.fileName,
+    required this.rawRef,
+  });
 
   final String assetPath;
   final String fileName;
+
+  /// 消息里原本那串引用。抢救失败时要显示出来——
+  /// 不然只能看到一个「图不在了」,谁都判断不出是哪一串引用出的问题。
+  final String rawRef;
 
   @override
   State<_AssetImage> createState() => _AssetImageState();
@@ -1861,22 +1864,36 @@ class _AssetImageState extends State<_AssetImage> {
   Uint8List? _rescued;
   var _tried = false;
 
+  /// 抢救失败的原因。显示在占位上,一眼看得到是哪一步断的。
+  String _why = '';
+
   Future<void> _rescue() async {
     if (_tried) return;
     _tried = true;
-    // 先试磁盘(用户自添加的图在这里),再按文件名回查内置图库。
-    final bytes = await ChatImages.bytesOf(ChatImage(ref: widget.fileName));
+    String why;
+    try {
+      final bytes = await ChatImages.bytesOf(ChatImage(ref: widget.fileName));
+      if (bytes != null && bytes.isNotEmpty) {
+        if (!mounted) return;
+        setState(() => _rescued = bytes);
+        return;
+      }
+      why = '按文件名「${widget.fileName}」在磁盘和内置图库里都没找到';
+    } catch (error) {
+      why = '读取失败:$error';
+    }
     if (!mounted) return;
-    setState(() => _rescued = bytes);
+    setState(() => _why = why);
   }
 
   @override
   Widget build(BuildContext context) {
     if (_failed) {
-      unawaited(_rescue());
-      final bytes = _rescued;
-      if (bytes != null) return Image.memory(bytes, fit: BoxFit.contain);
-      return _brokenBox(context);
+      if (_rescued != null) {
+        return Image.memory(_rescued!, fit: BoxFit.contain);
+      }
+      // 没救回来:把**引用和原因**一起显示出来。
+      return _brokenBox(context, ref: widget.rawRef, why: _why);
     }
     return Image.asset(
       'assets/${widget.assetPath}',
@@ -1884,7 +1901,11 @@ class _AssetImageState extends State<_AssetImage> {
       errorBuilder: (context, error, stack) {
         // 在 build 里不能直接 setState,排到下一帧。
         WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) setState(() => _failed = true);
+          if (!mounted) return;
+          setState(() => _failed = true);
+          // **这里补上抢救**:以前只置了 _failed 却没调 _rescue,
+          // 于是"回查图库"那条路根本不会走,永远停在破图上。
+          unawaited(_rescue());
         });
         return const SizedBox(width: 120, height: 90);
       },
@@ -1892,22 +1913,52 @@ class _AssetImageState extends State<_AssetImage> {
   }
 }
 
-/// 图片加载不出来时的占位。放在顶层:_MessageImage 和 _DiskImage 都要用。
-Widget _brokenBox(BuildContext context) {
+/// 截断一段可能很长的文本,给占位框用。
+String _clip(String text, int max) =>
+    text.length <= max ? text : '${text.substring(0, max)}…';
+
+/// 图片加载不出来时的占位。
+///
+/// **把引用和原因一起显示出来**。以前只有一个「图不在了」——
+/// 用户和我都看不出是哪一串引用出的问题,只能靠猜(这就是这个 bug
+/// 拖了好几轮的真正原因:没有数据)。
+Widget _brokenBox(BuildContext context, {String ref = '', String why = ''}) {
   final textSecondary = Theme.of(context).brightness == Brightness.dark
       ? AppTheme.darkTextSecondary
       : AppTheme.lightTextSecondary;
+  final detail = [
+    if (ref.isNotEmpty) '引用:${_clip(ref, 120)}',
+    if (why.isNotEmpty) _clip(why, 120),
+  ].join('\n');
   return Container(
-    width: 120,
-    height: 90,
-    alignment: Alignment.center,
+    // 不给固定高度:诊断文字有几行算几行,给死高度就会溢出。
+    constraints: const BoxConstraints(minWidth: 120, maxWidth: 260),
+    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
     color: Colors.black12,
     child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Icon(Icons.broken_image_outlined, size: 22, color: textSecondary),
-        const SizedBox(height: 4),
-        Text('图不在了', style: TextStyle(fontSize: 11.5, color: textSecondary)),
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.broken_image_outlined, size: 20, color: textSecondary),
+            const SizedBox(width: 6),
+            Text(
+              '图不在了',
+              style: TextStyle(fontSize: 11.5, color: textSecondary),
+            ),
+          ],
+        ),
+        if (detail.isNotEmpty) ...[
+          const SizedBox(height: 4),
+          // 用 Text 不用 SelectableText:诊断信息不该引入选区那套东西
+          // (它会跟着外层的选区一起注册,行为难以预期)。
+          Text(
+            detail,
+            style: TextStyle(fontSize: 10, height: 1.35, color: textSecondary),
+          ),
+        ],
       ],
     ),
   );
@@ -1973,14 +2024,19 @@ class _DiskImageState extends State<_DiskImage> {
       return Image.file(
         file,
         fit: BoxFit.contain,
-        errorBuilder: (context, error, stack) => _brokenBox(context),
+        errorBuilder: (context, error, stack) =>
+            _brokenBox(context, ref: widget.fileName, why: '文件读不出来:$error'),
       );
     }
     final bytes = _fallback;
     if (bytes != null) {
       return Image.memory(bytes, fit: BoxFit.contain);
     }
-    return _brokenBox(context);
+    return _brokenBox(
+      context,
+      ref: widget.fileName,
+      why: '磁盘上没有这个文件,图库里也没有同名的内置图',
+    );
   }
 }
 
