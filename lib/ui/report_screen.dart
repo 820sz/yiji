@@ -35,9 +35,16 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
 
   /// AI 成稿的流式缓冲。
   String _draft = '';
+
+  /// 思考过程的流式缓冲。和正文分开存:成稿里不该混进思考。
+  String _reasoning = '';
+
+  /// 用户自己补的要求(打完再生成/再发一次)。
+  final _extra = TextEditingController();
+
   bool _generating = false;
   String? _aiError;
-  StreamSubscription<String>? _subscription;
+  StreamSubscription<ReportDelta>? _subscription;
 
   bool get _isWeek => _tabs.index == 0;
 
@@ -51,6 +58,7 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
   @override
   void dispose() {
     _subscription?.cancel();
+    _extra.dispose();
     _tabs.dispose();
     super.dispose();
   }
@@ -62,6 +70,7 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
     // API 调用被展示到错误的区间上。
     _cancelGeneration();
     _draft = '';
+    _reasoning = '';
     _aiError = null;
     // 延到下一帧再取数:切页签会触发本方法,而那时 TabBar 还在构建,
     // 直接在里面 setState 会撞上"在错误的构建作用域里标脏组件"。
@@ -127,20 +136,30 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
     final generation = '${_isWeek ? 'week' : 'month'}:$_anchor';
     setState(() {
       _draft = '';
+      _reasoning = '';
       _aiError = null;
       _generating = true;
     });
 
+    // 用户自己补的要求一起发过去。他打完字点"重新生成"就是这条路。
+    final extra = _extra.text.trim();
     final stream = _isWeek
-        ? state.generateWeekReport(_anchor)
-        : state.generateMonthReport(_anchor);
+        ? state.generateWeekReport(_anchor, extra: extra)
+        : state.generateMonthReport(_anchor, extra: extra);
 
     bool stillCurrent() => mounted && _generationKey == generation;
 
     _subscription = stream.listen(
-      (chunk) {
+      (delta) {
         if (!stillCurrent()) return;
-        setState(() => _draft += chunk);
+        setState(() {
+          // 思考和正文分开放:混在一起的话用户复制出来的成稿里会带着思考。
+          if (delta.isReasoning) {
+            _reasoning += delta.reasoning;
+          } else {
+            _draft += delta.text;
+          }
+        });
       },
       onError: (Object error) {
         if (!stillCurrent()) return;
@@ -289,7 +308,9 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
                         hasKey: hasKey,
                         generating: _generating,
                         draft: _draft,
+                        reasoning: _reasoning,
                         error: _aiError,
+                        extraController: _extra,
                         onGenerate: _generate,
                         onCopy: _copyDraft,
                         onShare: _shareDraft,
@@ -299,6 +320,133 @@ class _ReportScreenState extends State<ReportScreen> with SingleTickerProviderSt
                   ),
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// 成稿区里的思考过程块。
+///
+/// 和聊天页同一套做法:**定高 + 区内滚动 + 生成完自动收起**。
+/// 用户要求"总结功能要支持流式思考和输出"——以前这里把 reasoning 分片
+/// 直接丢掉了,界面上只看得到正文在长,看不到它在想什么。
+class _ReportReasoning extends StatefulWidget {
+  const _ReportReasoning({required this.text, required this.live});
+
+  final String text;
+  final bool live;
+
+  @override
+  State<_ReportReasoning> createState() => _ReportReasoningState();
+}
+
+class _ReportReasoningState extends State<_ReportReasoning> {
+  late bool _expanded = widget.live;
+  bool _userToggled = false;
+  final _inner = ScrollController();
+
+  @override
+  void didUpdateWidget(_ReportReasoning oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 生成完自己收起来;用户点开过就不收,别把他正在读的抽走。
+    if (oldWidget.live && !widget.live && !_userToggled) {
+      setState(() => _expanded = false);
+    }
+  }
+
+  @override
+  void dispose() {
+    _inner.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final secondary = AppTheme.textSecondary(context);
+    return Material(
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(10),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => setState(() {
+          _userToggled = true;
+          _expanded = !_expanded;
+        }),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  if (widget.live)
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(strokeWidth: 1.8),
+                    )
+                  else
+                    Icon(Icons.psychology_outlined, size: 15, color: secondary),
+                  const SizedBox(width: 7),
+                  Text(
+                    widget.live ? '思考中' : '思考过程',
+                    style: TextStyle(
+                      fontSize: 12.5,
+                      fontWeight: FontWeight.w500,
+                      color: secondary,
+                    ),
+                  ),
+                  const Spacer(),
+                  AnimatedRotation(
+                    turns: _expanded ? 0.5 : 0,
+                    duration: AppTheme.fast,
+                    child: Icon(
+                      Icons.keyboard_arrow_down,
+                      size: 18,
+                      color: secondary,
+                    ),
+                  ),
+                ],
+              ),
+              AnimatedSize(
+                duration: AppTheme.fast,
+                curve: AppTheme.easeOut,
+                alignment: Alignment.topLeft,
+                child: _expanded
+                    ? Padding(
+                        padding: const EdgeInsets.only(top: 7),
+                        child: ConstrainedBox(
+                          // 定高:内容在里面滚,不把成稿区挤没了。
+                          constraints: const BoxConstraints(maxHeight: 170),
+                          child: PrimaryScrollController.none(
+                            child: Scrollbar(
+                              controller: _inner,
+                              thumbVisibility: !widget.live,
+                              child: SingleChildScrollView(
+                                controller: _inner,
+                                reverse: true,
+                                padding: const EdgeInsets.only(right: 6),
+                                child: SizedBox(
+                                  width: double.infinity,
+                                  child: Text(
+                                    widget.text,
+                                    style: TextStyle(
+                                      fontSize: 13,
+                                      height: 1.6,
+                                      color: secondary,
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      )
+                    : const SizedBox(width: double.infinity),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -530,7 +678,9 @@ class _AiSection extends StatelessWidget {
     required this.hasKey,
     required this.generating,
     required this.draft,
+    required this.reasoning,
     required this.error,
+    required this.extraController,
     required this.onGenerate,
     required this.onCopy,
     required this.onShare,
@@ -540,7 +690,15 @@ class _AiSection extends StatelessWidget {
   final bool hasKey;
   final bool generating;
   final String draft;
+
+  /// 模型的思考过程。单独一块显示,不混进成稿。
+  final String reasoning;
+
   final String? error;
+
+  /// 用户自己补的要求。打完点生成就一起发过去。
+  final TextEditingController extraController;
+
   final Future<void> Function() onGenerate;
   final Future<void> Function() onCopy;
   final Future<void> Function() onShare;
@@ -577,6 +735,12 @@ class _AiSection extends StatelessWidget {
                 ],
               ],
             ),
+            // 思考过程。和聊天页同一套:定高、区内滚动、生成完自己收起来。
+            // 用户要求"总结功能要支持流式思考"——以前这里根本不显示它。
+            if (reasoning.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              _ReportReasoning(text: reasoning, live: generating),
+            ],
             const SizedBox(height: 8),
             if (!hasKey)
               Text(
@@ -610,6 +774,26 @@ class _AiSection extends StatelessWidget {
                 style: const TextStyle(fontSize: 14.5, height: 1.7),
               ),
             ],
+            const SizedBox(height: 12),
+            // 自己补一句要求再生成。
+            //
+            // 用户的原话:"还要能让用户能自行打字调整需求再发呀,
+            // 而不是现在这种只能选择总结"。所以这里是个真的输入框,
+            // 内容会跟着下一次生成一起发给模型。
+            TextField(
+              controller: extraController,
+              minLines: 1,
+              maxLines: 3,
+              style: const TextStyle(fontSize: 13.5),
+              decoration: InputDecoration(
+                isDense: true,
+                hintText: '想让它怎么写?比如:短一点,重点说英语那部分',
+                prefixIcon: const Icon(Icons.edit_note, size: 18),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+            ),
             const SizedBox(height: 12),
             Row(
               children: [

@@ -535,6 +535,26 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
+  /// 重置进度:**清空推进记录与当前值,待办和完成标记保留**。
+  ///
+  /// 用户的原话:"定一个进度,就一直住那了,我开启新周期了咋办?"。
+  /// 这里只动进度那一半——待办清单是他的安排,不该被"重置进度"顺手清掉。
+  Future<void> resetProgress() async {
+    await _store.clearAllProgress();
+    await refreshGoals();
+    await _refreshPendingSync();
+  }
+
+  /// 重设任务:**清空待办清单,进度记录保留**。
+  ///
+  /// 进度记录是已经发生的推进历史,不该因为换了任务清单就消失。
+  Future<void> resetTasks() async {
+    await _store.clearAllTasks();
+    await _loadDay();
+    await loadCalendarMonth(_calendarMonth);
+    await _refreshPendingSync();
+  }
+
   /// 删掉某天的想法(日历里那条删除入口走这里)。
   Future<void> deleteJournal(String day) async {
     // 文字和照片一起清空才算删掉:只清文字的话会留下一条"只有照片"的日记。
@@ -1047,50 +1067,88 @@ class AppState extends ChangeNotifier {
 
   /// 让 AI 基于真实打卡数据写周报。产出同时缓存为导出用草稿。
   ///
-  /// 返回增量文本流;调用方负责把结果拼起来。失败时抛 [AiException]。
-  Stream<String> generateWeekReport(String anyDayInWeek) async* {
+  /// [extra] 是用户自己补的要求("写短点""重点说英语那部分")。
+  /// 用户明确要求过"还能让用户自行打字调整需求再发,而不是只能选择总结"。
+  ///
+  /// [withReasoning] 为真时把**思考过程**也一起流出来。
+  /// 用户要求"总结功能要支持流式思考和输出";以前这里把 reasoning 分片
+  /// 直接丢掉了,界面上只看得到正文在长。
+  Stream<ReportDelta> generateWeekReport(
+    String anyDayInWeek, {
+    String extra = '',
+    bool withReasoning = true,
+  }) async* {
     final report = await weekReport(anyDayInWeek);
-    final context = _reports.aiContext(report, periodLabel: weekLabel(anyDayInWeek));
+    final context = _reports.aiContext(
+      report,
+      periodLabel: weekLabel(anyDayInWeek),
+    );
     final buffer = StringBuffer();
 
-    await for (final chunk in _ai.streamChat(
-      config: aiConfig,
-      history: [
-        AiMessage.system(
-          reportPrompt(
-            periodLabel: '${weekLabel(anyDayInWeek)} 的周总结',
-            userContext: displayName,
-          ),
-        ),
-        AiMessage.user(context),
-      ],
-    )) {
-      // 报告只取最终回答,思考过程不进正文。
-      if (chunk.isReasoning) continue;
-      buffer.write(chunk.text);
-      _weekDraft = buffer.toString();
-      yield chunk.text;
-    }
+    yield* _streamReport(
+      periodLabel: '${weekLabel(anyDayInWeek)} 的周总结',
+      context: context,
+      extra: extra,
+      withReasoning: withReasoning,
+      onAnswer: (text) {
+        buffer.write(text);
+        _weekDraft = buffer.toString();
+      },
+    );
   }
 
   /// 生成月报,同样返回增量流(不缓存草稿,月报目前只用于阅读和分享)。
-  Stream<String> generateMonthReport(String anyDayInMonth) async* {
+  Stream<ReportDelta> generateMonthReport(
+    String anyDayInMonth, {
+    String extra = '',
+    bool withReasoning = true,
+  }) async* {
     final report = await monthReport(anyDayInMonth);
-    final context = _reports.aiContext(report, periodLabel: monthLabel(anyDayInMonth));
+    final context = _reports.aiContext(
+      report,
+      periodLabel: monthLabel(anyDayInMonth),
+    );
+    yield* _streamReport(
+      periodLabel: '${monthLabel(anyDayInMonth)} 的月总结',
+      context: context,
+      extra: extra,
+      withReasoning: withReasoning,
+    );
+  }
+
+  /// 周报和月报共用的流式实现。
+  ///
+  /// 两个报告只差提示词和数据,流式这一层不该写两遍——写两遍就会出现
+  /// "月报忘了带上用户补充的要求"这种只坏一半的 bug。
+  Stream<ReportDelta> _streamReport({
+    required String periodLabel,
+    required String context,
+    required String extra,
+    required bool withReasoning,
+    void Function(String text)? onAnswer,
+  }) async* {
+    // 用户补充的要求作为**单独一条 user 消息**附在数据之后:
+    // 混进数据里的话,模型分不清哪部分是事实、哪部分是指令。
+    final history = [
+      AiMessage.system(
+        reportPrompt(periodLabel: periodLabel, userContext: displayName),
+      ),
+      AiMessage.user(context),
+      if (extra.trim().isNotEmpty)
+        AiMessage.user('另外,请按这个要求来写:${extra.trim()}'),
+    ];
+
     await for (final chunk in _ai.streamChat(
       config: aiConfig,
-      history: [
-        AiMessage.system(
-          reportPrompt(
-            periodLabel: '${monthLabel(anyDayInMonth)} 的月总结',
-            userContext: displayName,
-          ),
-        ),
-        AiMessage.user(context),
-      ],
+      history: history,
     )) {
-      if (chunk.isReasoning) continue;
-      yield chunk.text;
+      if (chunk.isReasoning) {
+        if (!withReasoning) continue;
+        yield ReportDelta(reasoning: chunk.text);
+        continue;
+      }
+      onAnswer?.call(chunk.text);
+      yield ReportDelta(text: chunk.text);
     }
   }
 
@@ -1746,6 +1804,19 @@ class AppState extends ChangeNotifier {
     _ai.dispose();
     super.dispose();
   }
+}
+
+/// 周报/月报流式产出的一小段。
+///
+/// 分成"思考"和"正文"两路:思考要单独显示在一个会自己滚的区域里,
+/// 不能混进正文——混进去的话用户复制出来的是带着思考的文本。
+class ReportDelta {
+  const ReportDelta({this.text = '', this.reasoning = ''});
+
+  final String text;
+  final String reasoning;
+
+  bool get isReasoning => reasoning.isNotEmpty;
 }
 
 /// 一条等着挂到聊天输入框上方的心得分享。

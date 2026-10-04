@@ -1340,6 +1340,101 @@ void main() {
     });
   });
 
+  group('重置的两半互不牵连', () {
+    // 用户的原话:"定一个进度,就一直住那了,我开启新周期了咋办?"
+    // 两个操作各自的契约是重点——删错一半是找不回来的。
+    test('重置进度:进度清了,待办和完成标记还在', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      final taskId = await store.addTask('2026-10-01', '码字', color: TaskColor.blue);
+      await store.setTaskDone(taskId, true);
+      final goalId = await store.addGoal(
+        title: '小说推进',
+        unit: '字',
+        target: 10000,
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.blue,
+      );
+      await store.addProgress(
+        goalId: goalId,
+        amount: 2000,
+        day: '2026-10-01',
+        note: '',
+        taskId: taskId,
+      );
+      expect(
+        await store.progressEntriesBetween('2026-01-01', '2026-12-31'),
+        isNotEmpty,
+      );
+
+      await store.clearAllProgress();
+
+      expect(
+        await store.progressEntriesBetween('2026-01-01', '2026-12-31'),
+        isEmpty,
+        reason: '进度记录该清掉',
+      );
+      final tasks = await store.tasksOfDay('2026-10-01');
+      expect(tasks, hasLength(1), reason: '重置进度不该删掉待办');
+      expect(tasks.single.done, isTrue, reason: '重置进度不该抹掉完成标记');
+    });
+
+    test('重设任务:待办清了,进度记录还在', () async {
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      final taskId = await store.addTask('2026-10-01', '码字', color: TaskColor.blue);
+      final goalId = await store.addGoal(
+        title: '小说推进',
+        unit: '字',
+        target: 10000,
+        period: GoalPeriod.weekly,
+        direction: GoalDirection.increase,
+        color: TaskColor.blue,
+      );
+      await store.addProgress(
+        goalId: goalId,
+        amount: 2000,
+        day: '2026-10-01',
+        note: '',
+        taskId: taskId,
+      );
+
+      await store.clearAllTasks();
+
+      expect(await store.tasksOfDay('2026-10-01'), isEmpty, reason: '待办该清掉');
+      // 进度记录是**已经发生的推进历史**,换了任务清单也该留着。
+      final entries = await store.progressEntriesBetween(
+        '2026-01-01',
+        '2026-12-31',
+      );
+      expect(entries, hasLength(1), reason: '重设任务不该删掉进度记录');
+      expect(entries.single.amount, 2000);
+    });
+
+    test('重设任务会把挂在待办上的提醒一起清掉', () async {
+      // 提醒挂在待办上;待办没了它就是孤儿,留着只会在别处冒出来。
+      final db = await AppDatabase.open(path: inMemoryDatabasePath);
+      addTearDown(db.close);
+      final store = SqliteRecordStore(db.db);
+
+      final taskId = await store.addTask('2026-10-01', '开会', color: TaskColor.blue);
+      await store.addReminder(
+        taskId: taskId,
+        day: '2026-10-01',
+        at: '09:00',
+      );
+
+      await store.clearAllTasks();
+
+      expect(await store.remindersOn('2026-10-01'), isEmpty);
+    });
+  });
+
   group('待同步计数', () {
     test('没有进度记录的事,标记后也不再计入', () async {
       // 「取快递」永远匹配不上推进条,所以它永远没有进度记录。

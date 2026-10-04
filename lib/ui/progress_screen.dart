@@ -55,6 +55,22 @@ class ProgressScreen extends StatelessWidget {
                 ],
               ),
               const Spacer(),
+              // 开始新周期时用:重置进度 / 重设任务。
+              PopupMenuButton<String>(
+                icon: Icon(Icons.more_vert, color: textPrimary),
+                tooltip: '重置',
+                onSelected: (value) => _reset(context, value),
+                itemBuilder: (context) => const [
+                  PopupMenuItem(
+                    value: 'progress',
+                    child: Text('重置进度(保留任务)'),
+                  ),
+                  PopupMenuItem(
+                    value: 'tasks',
+                    child: Text('重设任务(保留进度记录)'),
+                  ),
+                ],
+              ),
               IconButton(
                 onPressed: () => _createGoal(context),
                 icon: Icon(Icons.add_circle_outline, color: textPrimary),
@@ -205,7 +221,52 @@ class ProgressScreen extends StatelessWidget {
     await state.addProgress(goal, result.$1, result.$2);
   }
 
-  Future<void> _createGoal(BuildContext context) async {
+  /// 重置进度 / 重设任务。
+///
+/// 两个都是破坏性操作,所以都先说清"会删什么、会留什么",再让用户确认。
+/// 只写"确定吗"是不够的——他不知道代价是什么,只能赌。
+Future<void> _reset(BuildContext context, String what) async {
+  final state = AppScope.of(context);
+  final progress = what == 'progress';
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(progress ? '重置进度?' : '重设任务?'),
+      content: Text(
+        progress
+            ? '所有推进条的当前值会归零,推进记录被清空。\n'
+                '**待办和完成标记都留着**——只是重新开始算推进。'
+            : '所有待办会被删掉(包括完成标记和提醒)。\n'
+                '**进度记录保留**——那是已经发生的推进历史,不会跟着消失。',
+        style: const TextStyle(fontSize: 13.5, height: 1.6),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(progress ? '重置进度' : '重设任务'),
+        ),
+      ],
+    ),
+  );
+  if (ok != true) return;
+  if (progress) {
+    await state.resetProgress();
+  } else {
+    await state.resetTasks();
+  }
+  if (!context.mounted) return;
+  ScaffoldMessenger.of(context).showSnackBar(
+    SnackBar(
+      content: Text(progress ? '进度已归零,任务还在' : '任务已清空,进度记录保留'),
+    ),
+  );
+}
+
+Future<void> _createGoal(BuildContext context) async {
     final state = AppScope.of(context);
     final draft = await showModalBottomSheet<GoalDraft>(
       context: context,

@@ -568,6 +568,21 @@ class SqliteRecordStore implements RecordStore {
   }
 
   @override
+  Future<void> clearAllProgress() async {
+    // 只清进度记录。待办、完成标记、日记都留着——
+    // 用户要的是"重新开始算推进",不是"把这一段时间抹掉"。
+    await _db.delete('progress_entries');
+  }
+
+  @override
+  Future<void> clearAllTasks() async {
+    // 提醒挂在待办上;待办没了它们就是孤儿,一起清掉。
+    await _db.delete('reminders');
+    // 进度记录**不动**:那是已经发生的推进历史,换了任务清单也该留着。
+    await _db.delete('tasks');
+  }
+
+  @override
   Future<Set<int>> tasksWithProgress() async {
     final rows = await _db.rawQuery(
       'SELECT DISTINCT task_id FROM progress_entries WHERE task_id IS NOT NULL',

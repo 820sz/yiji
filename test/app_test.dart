@@ -295,6 +295,52 @@ void main() {
   // ---------- 进度页 ----------
 
   group('进度页', () {
+    testWidgets('能重置进度,而且不碰待办', (tester) async {
+      // 用户的原话:"定一个进度,就一直住那了,我开启新周期了咋办?"
+      // 两个重置各删一半,契约不能错——删错是找不回来的。
+      store.seedGoal(title: '小说推进', unit: '字', target: 10000, current: 2500);
+      store.seedTask(today, '码字', done: true);
+      await pumpApp(tester);
+      await openTab(tester, '进度');
+
+      await tester.tap(find.byTooltip('重置'));
+      await tester.pumpAndSettle();
+      expect(find.text('重置进度(保留任务)'), findsOneWidget);
+      expect(find.text('重设任务(保留进度记录)'), findsOneWidget);
+      await tester.tap(find.text('重置进度(保留任务)'));
+      await tester.pumpAndSettle();
+
+      // 确认弹窗必须说清代价,不能只问"确定吗"。
+      expect(find.textContaining('待办和完成标记都留着'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, '重置进度'));
+      await tester.pumpAndSettle();
+
+      // 待办还在,而且完成标记也还在。
+      expect(
+        await store.tasksOfDay(today),
+        hasLength(1),
+        reason: '重置进度不该删掉待办',
+      );
+      expect((await store.tasksOfDay(today)).single.done, isTrue);
+    });
+
+    testWidgets('能重设任务,而且进度记录保留', (tester) async {
+      store.seedTask(today, '码字', done: true);
+      await pumpApp(tester);
+      await openTab(tester, '进度');
+
+      await tester.tap(find.byTooltip('重置'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('重设任务(保留进度记录)'));
+      await tester.pumpAndSettle();
+
+      expect(find.textContaining('进度记录保留'), findsOneWidget);
+      await tester.tap(find.widgetWithText(FilledButton, '重设任务'));
+      await tester.pumpAndSettle();
+
+      expect(await store.tasksOfDay(today), isEmpty, reason: '待办该清掉');
+    });
+
     testWidgets('没有目标时给出建目标的引导', (tester) async {
       await pumpApp(tester);
       await openTab(tester, '进度');

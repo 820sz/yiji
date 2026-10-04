@@ -611,6 +611,20 @@ class FakeStore implements RecordStore {
   }
 
   @override
+  Future<void> clearAllProgress() async {
+    // 只清进度,待办留着——和生产实现同一套语义,
+    // 测试才盯得住"重置进度不该顺手删掉待办"这条约定。
+    _entries.clear();
+  }
+
+  @override
+  Future<void> clearAllTasks() async {
+    // 只清待办(以及挂在它们上的提醒),进度记录保留。
+    _tasks.clear();
+    _reminders.clear();
+  }
+
+  @override
   Future<Set<int>> tasksWithProgress() async {
     return _entries.where((e) => e.taskId != null).map((e) => e.taskId!).toSet();
   }
