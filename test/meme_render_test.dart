@@ -59,8 +59,8 @@ void main() {
       final picked = memes.pickByCaption(directive.emotion);
       expect(picked, isNotNull, reason: 'caption「${sample.caption}」应当能挑到图');
 
-      // 落库的正文长这样。
-      final content = '${directive.text}\n\n${memeLineFor(picked!.assetPath)}';
+      // 落库的正文长这样。**用 messageRef**,和 AI 那条路一致。
+      final content = '${directive.text}\n\n${memeLineFor(picked!.messageRef)}';
       // 渲染时再解析回引用。
       final parsed = ChatImage.parse(content.split('\n').last);
       expect(parsed, isNotNull, reason: '写进消息的那行应当能被解析回图片');
@@ -72,7 +72,11 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      // `Image.asset` 是**异步解码**的:`pumpAndSettle` 不会等它,
+      // 一帧就看的话组件还没建出来。给解码几帧时间。
+      for (var frame = 0; frame < 10; frame++) {
+        await tester.pump(const Duration(milliseconds: 30));
+      }
 
       expect(
         find.text('图不在了'),
@@ -80,10 +84,13 @@ void main() {
         reason: 'caption「${sample.caption}」渲染成了"图不在了"'
             '(引用是 ${parsed!.ref})',
       );
+      // 解码成功后 Flutter 实际画的是 RawImage(Image 是它的外壳)。
       expect(
-        find.byType(Image),
-        findsWidgets,
-        reason: 'caption「${sample.caption}」没有渲染出任何图片',
+        find.byType(Image).evaluate().isNotEmpty ||
+            find.byType(RawImage).evaluate().isNotEmpty,
+        isTrue,
+        reason: 'caption「${sample.caption}」没有渲染出任何图片'
+            '(引用是 ${parsed!.ref})',
       );
     }
   });
@@ -100,6 +107,43 @@ void main() {
     // 它有时会写 `asset:memes/angry/...webp`——那不是真实路径。
     expect(ChatImage.parse('![图] asset:memes/angry/...webp'), isNull);
     expect(ChatImage.parse('![图] `asset:memes/happy/1.webp`'), isNotNull);
+  });
+
+  test('用户自添加的表情包,引用指向磁盘文件名而不是包内路径', () async {
+    // **这就是用户遇到的"AI 发图还是图不在了"的真凶。**
+    //
+    // AI 发图那条路以前写的是 `memeLineFor(meme.assetPath)`,而
+    // `assetPath` 永远返回 `memes/<file>` —— 对用户自添加的图来说,
+    // 那个路径在安装包里根本不存在,渲染必然失败。
+    // 引用应该是 messageRef:内置图带 `asset:` 前缀,用户图就是文件名。
+    const userMeme = Meme(
+      file: 'user_123.png',
+      tag: 'mine',
+      caption: '我自己加的一张',
+      keywords: '',
+      fromUser: true,
+    );
+    const builtinMeme = Meme(
+      file: 'happy/x.webp',
+      tag: 'happy',
+      caption: '内置的一张',
+      keywords: '',
+    );
+
+    // 用户图:引用是文件名,渲染时走磁盘那条路。
+    expect(userMeme.messageRef, 'user_123.png');
+    expect(userMeme.messageRef.startsWith('asset:'), isFalse);
+    final userLine = memeLineFor(userMeme.messageRef);
+    final userParsed = ChatImage.parse(userLine);
+    expect(userParsed, isNotNull);
+    expect(userParsed!.isAsset, isFalse, reason: '用户图不该被当成安装包内的资源');
+    expect(userParsed.fileName, 'user_123.png');
+
+    // 内置图:引用带 asset 前缀,渲染时走资源那条路。
+    expect(builtinMeme.messageRef, 'asset:memes/happy/x.webp');
+    final builtinParsed = ChatImage.parse(memeLineFor(builtinMeme.messageRef));
+    expect(builtinParsed!.isAsset, isTrue);
+    expect(builtinParsed.assetPath, 'memes/happy/x.webp');
   });
 
   test('老消息里丢掉的图,能按文件名取回安装包内的同一张', () async {

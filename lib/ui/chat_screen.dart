@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollCacheExtent;
+import 'package:flutter/scheduler.dart' show SchedulerBinding, SchedulerPhase;
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 
@@ -392,7 +393,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final position = _scroll.position;
     // 往上留一点余量:刚到底部时按钮不该闪出来。
     final away = position.maxScrollExtent - position.pixels > 80;
-    // **只有用户的手指能改变跟不跟底。**
+    // **只有手指能把"跟底"重新打开。**
+    //
+    // 这个 && _userDragging 是关键:程序化的 jumpTo 也会走到这里,
+    // 如果它能把 _followBottom 置回 true,就形成死循环——
+    // 贴底 → 回弹 → 位置在底部 → 状态变回"该跟底" → 再贴底,
+    // 用户看到的是一条**锁死在底部、怎么划都弹回去**的列表。
     if (_userDragging) {
       _followBottom = !away;
     }
@@ -418,6 +424,18 @@ class _ChatScreenState extends State<ChatScreen> {
     final metrics = notification.metrics;
     // 已经在底部就不用动。
     if (metrics.pixels >= metrics.maxScrollExtent - 2) return false;
+    // 外面还套着一帧布局(比如键盘弹起)时不要抢:位置会在一帧内再变,
+    // 这时跳过去还得再跳一次,连起来就是抖。
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scroll.hasClients || !_followBottom) return;
+        final position = _scroll.position;
+        if (position.pixels >= position.maxScrollExtent - 2) return;
+        _scroll.jumpTo(position.maxScrollExtent);
+      });
+      return false;
+    }
     _scroll.jumpTo(metrics.maxScrollExtent);
     return false;
   }
@@ -1790,12 +1808,13 @@ class _MessageImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    // 内置引用渲染失败时**不是终点**:按文件名回查一次图库。
+    //
+    // 消息里可能出现各种历史遗留的引用(以前写过 `asset:memes/user_x.png`
+    // 这种安装包里根本不存在的路径)。只要图还在库里,就该把它画出来,
+    // 而不是给用户看一个"图不在了"——那等于把他的历史永久弄坏。
     final source = image.isAsset
-        ? Image.asset(
-            'assets/${image.assetPath}',
-            fit: BoxFit.contain,
-            errorBuilder: (context, error, stack) => _broken(context),
-          )
+        ? _AssetImage(assetPath: image.assetPath, fileName: image.fileName)
         : _DiskImage(fileName: image.fileName);
 
     // 尺寸按来源分档。
@@ -1821,7 +1840,56 @@ class _MessageImage extends StatelessWidget {
     );
   }
 
-  Widget _broken(BuildContext context) => _brokenBox(context);
+}
+
+/// 内置图:**渲染失败时按文件名回查图库,再退回磁盘**。
+///
+/// 消息里的引用可能来自任何历史版本。只认一条精确路径的话,当年写错的那种
+/// 引用就永远显示"图不在了"——而图其实好好躺在图库里或磁盘上。
+class _AssetImage extends StatefulWidget {
+  const _AssetImage({required this.assetPath, required this.fileName});
+
+  final String assetPath;
+  final String fileName;
+
+  @override
+  State<_AssetImage> createState() => _AssetImageState();
+}
+
+class _AssetImageState extends State<_AssetImage> {
+  var _failed = false;
+  Uint8List? _rescued;
+  var _tried = false;
+
+  Future<void> _rescue() async {
+    if (_tried) return;
+    _tried = true;
+    // 先试磁盘(用户自添加的图在这里),再按文件名回查内置图库。
+    final bytes = await ChatImages.bytesOf(ChatImage(ref: widget.fileName));
+    if (!mounted) return;
+    setState(() => _rescued = bytes);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_failed) {
+      unawaited(_rescue());
+      final bytes = _rescued;
+      if (bytes != null) return Image.memory(bytes, fit: BoxFit.contain);
+      return _brokenBox(context);
+    }
+    return Image.asset(
+      'assets/${widget.assetPath}',
+      fit: BoxFit.contain,
+      errorBuilder: (context, error, stack) {
+        // 在 build 里不能直接 setState,排到下一帧。
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) setState(() => _failed = true);
+        });
+        return const SizedBox(width: 120, height: 90);
+      },
+    );
+  }
 }
 
 /// 图片加载不出来时的占位。放在顶层:_MessageImage 和 _DiskImage 都要用。

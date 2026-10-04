@@ -1655,7 +1655,12 @@ class AppState extends ChangeNotifier {
     var answer = directive.text.trim();
     if (directive.hasMeme) {
       final meme = await _pickMeme(directive);
-      if (meme != null) answer = '$answer\n\n${memeLineFor(meme.assetPath)}';
+      // 用 messageRef,不是 assetPath。
+      //
+      // `assetPath` 对**用户自添加的图**会拼出一个安装包里不存在的路径
+      // (`asset:memes/user_xxx.png`),渲染必然失败成"图不在了"——
+      // 而 AI 恰恰会挑到用户自己加的图。messageRef 才知道两种来源各该怎么引用。
+      if (meme != null) answer = '$answer\n\n${memeLineFor(meme.messageRef)}';
     }
 
     if (answer.isEmpty || target == 0) {

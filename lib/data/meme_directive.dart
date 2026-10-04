@@ -95,4 +95,12 @@ MemeDirective _parseInner(String inner) {
 /// 已经从库里挑好了图,把它写进消息正文。
 ///
 /// 用统一的一行,回看历史时能直接渲染出那张图。
-String memeLineFor(String assetPath) => '![图] asset:$assetPath';
+///
+/// **必须传 [Meme.messageRef],不能传 [Meme.assetPath]。**
+///
+/// `assetPath` 永远返回 `memes/<file>`——那是**内置图**才有的包内路径。
+/// 用户自添加的图在私有目录里,它的 `assetPath` 指向一个安装包里并不存在
+/// 的文件,渲染必然失败成"图不在了"。`messageRef` 才是那个"两种来源各给
+/// 一个正确引用"的东西(内置 → `asset:...`,用户 → 文件名)。
+/// AI 发图这条路以前传的是 `assetPath`,所以它一挑到用户自己加的图就画不出来。
+String memeLineFor(String ref) => ref.isEmpty ? '' : '![图] $ref';
