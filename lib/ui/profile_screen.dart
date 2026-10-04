@@ -9,6 +9,7 @@ import '../state/app_state.dart';
 import '../update/app_updater.dart';
 import '../update/release_notes.dart';
 import 'ai_avatar.dart';
+import 'farewell.dart';
 import 'identity_card.dart';
 import 'prompt_dialog.dart';
 import 'report_screen.dart';
@@ -142,6 +143,18 @@ class ProfileScreen extends StatelessWidget {
           subtitle: state.farewellText,
           dark: dark,
           onTap: () => _editFarewellText(context),
+        ),
+        _Tile(
+          icon: Icons.logout,
+          title: '退出忆记',
+          subtitle: '道个别再走',
+          dark: dark,
+          onTap: () async {
+            // 显式入口:告别卡片不绑在返回键上。
+            // 上一轮把它挂在返回通道,连带把侧边栏和所有弹层都弄坏了。
+            final leave = await showFarewell(context);
+            if (leave) await exitApp();
+          },
         ),
         const SizedBox(height: 18),
         _SectionTitle('关于'),

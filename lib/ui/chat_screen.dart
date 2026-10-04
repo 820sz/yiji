@@ -321,8 +321,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 是否跟着新内容贴住底部。
   ///
-  /// 默认跟;用户往上翻之后就停,滑回底部再自动恢复。
+  /// 默认跟;用户**自己动手**往上翻之后就停,滑回底部再自动恢复。
   bool _followBottom = true;
+
+  /// 这一帧的滚动是不是手指带出来的。
+  bool _userDragging = false;
 
   /// 上一次看到的当前会话 id。用来发现"用户换了个对话"。
   int _lastConversationId = 0;
@@ -365,17 +368,33 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// 用户是不是**自己**在往上翻。
+  ///
+  /// 用 `dragDetails != null` 判断"这次滚动是手指带的":只有用户的手势
+  /// 才有资格改变"要不要跟底"。用位置判断的话,`jumpTo` 自己触发的滚动
+  /// 也会被当成用户操作——上一轮就是这么坏掉的:用户往上滑 → 被拽回底部 →
+  /// 位置又变成"在底部" → 状态重置成"该跟底" → 下一次继续拽,
+  /// 形成**回弹锁**,观感就是"卡死划不动"。
+  bool _onScrollStart(ScrollStartNotification notification) {
+    if (notification.dragDetails != null) {
+      _userDragging = true;
+    }
+    return false;
+  }
+
+  bool _onScrollEnd(ScrollEndNotification notification) {
+    _userDragging = false;
+    return false;
+  }
+
   void _onScroll() {
     if (!_scroll.hasClients) return;
     final position = _scroll.position;
     // 往上留一点余量:刚到底部时按钮不该闪出来。
     final away = position.maxScrollExtent - position.pixels > 80;
-    // 用户自己往回翻了:停止自动贴底,别抢他的滚动。
-    // 他再滑回底部就会重新跟上。
-    if (away) {
-      _followBottom = false;
-    } else if (!_followBottom) {
-      _followBottom = true;
+    // **只有用户的手指能改变跟不跟底。**
+    if (_userDragging) {
+      _followBottom = !away;
     }
     if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
   }
@@ -390,6 +409,11 @@ class _ChatScreenState extends State<ChatScreen> {
   /// 判断"内容变高"要靠 [ScrollMetricsNotification] 而不是控制器监听:
   /// 列表变长时滚动位置没变,控制器的监听器根本不会被调用。
   bool _onMetrics(ScrollMetricsNotification notification) {
+    // **只看外层列表。**
+    //
+    // 这个通知会从**任何后代** Scrollable 冒泡上来,包括思考块内部那个
+    // 滚动区。不判深度的话,思考区里滚一下就会把外层列表拽到底。
+    if (notification.depth != 0) return false;
     if (!_followBottom) return false;
     final metrics = notification.metrics;
     // 已经在底部就不用动。
@@ -585,7 +609,14 @@ class _ChatScreenState extends State<ChatScreen> {
       // 侧边栏挂在这里:会话列表要从左边滑出来,而且不该占着正文的位置。
       key: _scaffoldKey,
       backgroundColor: Colors.transparent,
-      drawer: ChatSidebar(onClose: () => Navigator.of(context).maybePop()),
+      // 关闭抽屉走 closeDrawer,**不走 Navigator.pop**。
+      //
+      // 抽屉是 Scaffold 自己的状态;用 pop 去关它属于"借导航通道做状态切换",
+      // 一旦这条 context 链上有别的 PopScope,行为就不确定了——上一轮
+      // 就是这么坏的:抽屉关不掉,人还被顶到任务页。
+      drawer: ChatSidebar(
+        onClose: () => _scaffoldKey.currentState?.closeDrawer(),
+      ),
       body: Column(
         children: [
           _ChatHeader(
@@ -621,9 +652,15 @@ class _ChatScreenState extends State<ChatScreen> {
                       // 参与命中测试与语义树构建,长列表就是持续掉帧
                       // (用户报的"上下滑动有明显卡帧")。包进条目里之后,
                       // 只有真正挂载的那几条参与,滚动是纯滚动。
-                      NotificationListener<ScrollMetricsNotification>(
-                        onNotification: _onMetrics,
-                        child: ListView.builder(
+                      // 手势通知:判断"这次滚动是不是手指带出来的"。
+                      // 只有用户自己的滑动才有资格改变跟不跟底。
+                      NotificationListener<ScrollStartNotification>(
+                        onNotification: _onScrollStart,
+                        child: NotificationListener<ScrollEndNotification>(
+                          onNotification: _onScrollEnd,
+                          child: NotificationListener<ScrollMetricsNotification>(
+                            onNotification: _onMetrics,
+                            child: ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                           // 多留一点预渲染范围:滚动时上下各半屏已经在树上了,
@@ -656,6 +693,8 @@ class _ChatScreenState extends State<ChatScreen> {
                               ),
                             );
                           },
+                            ),
+                          ),
                         ),
                       ),
                       Positioned(
@@ -1421,6 +1460,14 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
     if (oldWidget.live && !widget.live && !_userToggled) {
       setState(() => _expanded = false);
     }
+    // 流式追加时自己滚到底,让用户看到最新的想法。
+    // (以前靠 `reverse: true` 实现,但那会让展开瞬间的内容位置很怪。)
+    if (widget.text != oldWidget.text && _expanded) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_inner.hasClients) return;
+        _inner.jumpTo(_inner.position.maxScrollExtent);
+      });
+    }
   }
 
   @override
@@ -1508,9 +1555,13 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                                 child: SingleChildScrollView(
                                   controller: _inner,
                                   primary: false,
-                                  // 流式追加时**跟着滚到底**,这样看到的是最新想法;
-                                  // 用户往上翻的时候它会停在原处。
-                                  reverse: true,
+                                  // **不用 reverse。**
+                                  //
+                                  // reverse 会让内容从底部开始排,展开的瞬间
+                                  // 那一块文字像是"从下往上贴",再被外层列表
+                                  // 的贴底逻辑拽一下——用户看到的就是"点思考
+                                  // 过程之后整块乱串"。改成正常方向,并在
+                                  // 流式追加时自己滚到底。
                                   padding: const EdgeInsets.only(right: 6),
                                   child: SizedBox(
                                     width: double.infinity,

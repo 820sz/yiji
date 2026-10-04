@@ -5,7 +5,6 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'state/app_state.dart';
 import 'ui/calendar_screen.dart';
 import 'ui/chat_screen.dart';
-import 'ui/farewell.dart';
 import 'ui/profile_screen.dart';
 import 'ui/progress_screen.dart';
 import 'ui/splash_screen.dart';
@@ -121,22 +120,16 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
-    // 系统返回键先从"回第一个页签"开始:用户在聊天页按返回,
-    // 期待的是回到主页面,而不是直接被关掉应用。
-    return PopScope(
-      canPop: false,
-      onPopInvokedWithResult: (didPop, _) async {
-        if (didPop) return;
-        if (_index != 0) {
-          setState(() => _index = 0);
-          return;
-        }
-        // 已经在第一个页签了,再按一次就是要退出:给一个道别。
-        final leave = await showFarewell(context);
-        if (leave) await exitApp();
-      },
-      child: _shell(context),
-    );
+    // **这一层不拦返回键,也不做 tab 切换。**
+    //
+    // 曾经在这里放 `PopScope(canPop: false)`,想做"返回先回第一个页签、
+    // 再返回就道别"。结果是灾难性的回归:关侧边栏用的是 `Navigator.maybePop()`,
+    // 那个 pop 请求落在根路由上被这里拦下,于是抽屉关不掉、人还被顶到任务页;
+    // 所有弹层"点空白处关闭"也一起变成了跳页。
+    //
+    // 教训:**别用 pop 通道去做 tab 切换**。返回键的行为保持系统默认(退出应用),
+    // 页签切换只由底部导航负责,要道别的话走「我的」里那个入口。
+    return _shell(context);
   }
 
   Widget _shell(BuildContext context) {

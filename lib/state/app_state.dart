@@ -1429,24 +1429,24 @@ class AppState extends ChangeNotifier {
     // 对话则悄悄少了一次回答。
     _streamingConversationId = conversationId;
 
-    // 图片先落盘再记引用:消息里存 base64 会让每条消息膨胀几百 KB,
-    // 回看历史和查库都会变慢。存不下来就退化成文件名——至少不丢信息。
+    // 只有"还没有引用"的图才落盘换引用:消息里存 base64 会让每条消息
+    // 膨胀几百 KB,回看历史和查库都会变慢。
     //
-    // 内置表情包(imageRef 是 `asset:...`)**也要先落盘一份**,而不是直接把
-    // asset 路径写进消息。理由是渲染和历史带图这两条路只认一种引用:
-    // 多一种 `asset:` 分支就多一处漏判(用户发过的图渲染成"图不在了"、
-    // 或者重新发给模型时读不到)。用户自添加的表情包同理——它原本在
-    // user_memes/ 里,也要复制到聊天图片目录才走同一条路。
+    // 已经有引用的图**不动它**——内置表情包指向安装包里的资源,
+    // 抄一份到私有目录没有好处,反而会多出一个"文件被清掉就永久坏掉"的
+    // 失败点(用户报的"图不在了"就是这么来的)。用户自添加的表情包本身
+    // 就在私有目录里,引用已经是对的。
     final resolved = <ChatAttachment>[];
     for (final file in attachments) {
-      // 只有文件名、没有字节的图片(比如从"今日想法"分享过来的照片)
-      // 要把字节读出来。**不读的话模型看不到它**——images 列表是按
-      // imageBytes 拼的,只有引用就什么都不会发过去。
+      // **任何有引用、没字节的图片都要把字节读出来。**
+      //
+      // 这条以前写成"排除 asset 引用",结果是内置表情包一个字节都发不到
+      // 模型——它只认 `imageBytes`。用户在聊天里发张表情包,AI 收到的是一个
+      // 纯文字请求,什么都看不到(用户报的"ai 又看不到我的表情包了")。
+      // `ChatImages.bytesOf` 本来就同时支持 asset 和磁盘两种来源,
+      // 这里没有任何理由再按来源分叉。
       var current = file;
-      if (file.isImage &&
-          file.imageBytes == null &&
-          file.imageRef.isNotEmpty &&
-          !file.imageRef.startsWith('asset:')) {
+      if (file.isImage && file.imageBytes == null && file.imageRef.isNotEmpty) {
         final bytes = await ChatImages.bytesOf(ChatImage(ref: file.imageRef));
         if (bytes != null) {
           current = ChatAttachment(
@@ -1459,12 +1459,15 @@ class AppState extends ChangeNotifier {
           );
         }
       }
+      // 已经有引用的(内置表情包、从想法分享过来的照片)直接进结果:
+      // 引用已经够渲染了,不必再落盘一份。
       if (!current.isImage ||
           current.imageRef.isNotEmpty ||
           current.imageBytes == null) {
         resolved.add(current);
         continue;
       }
+      // 只有字节、没有引用的(用户刚选的相册照片)才需要落盘拿一个引用。
       final saved = await ChatImages.save(current.imageBytes!, current.name);
       resolved.add(
         saved == null
