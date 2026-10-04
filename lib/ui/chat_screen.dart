@@ -36,7 +36,10 @@ class ChatMetrics {
   static const bubbleGap = 14.0;
 
   /// 气泡内边距(纯文字)。
-  static const bubblePadding = EdgeInsets.symmetric(horizontal: 14, vertical: 11);
+  static const bubblePadding = EdgeInsets.symmetric(
+    horizontal: 14,
+    vertical: 11,
+  );
 
   /// 思考区封顶高度:内容在里面滚,不随文字长高。
   static const reasoningMaxHeight = 170.0;
@@ -158,7 +161,10 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _absorb(List<_Picked> files) async {
     final added = <ChatAttachment>[];
     for (final picked in files) {
-      final attachment = await ChatAttachment.fromBytes(picked.bytes, picked.name);
+      final attachment = await ChatAttachment.fromBytes(
+        picked.bytes,
+        picked.name,
+      );
       if (attachment == null) {
         _rejected.add(picked.name);
       } else {
@@ -190,10 +196,13 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _complain(String message) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
   }
 
-  Future<void> _showAttachSheet() async {    final choice = await showModalBottomSheet<String>(
+  Future<void> _showAttachSheet() async {
+    final choice = await showModalBottomSheet<String>(
       context: context,
       builder: (context) => SafeArea(
         child: Column(
@@ -281,17 +290,20 @@ class _ChatScreenState extends State<ChatScreen> {
         // 保存失败必须报出来:调整页正常退出、头像却没变,
         // 用户只会觉得"这个功能是坏的"(之前就是静默失败)。
         if (!mounted) return;
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(error.message)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.message)));
         return;
       }
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(const SnackBar(content: Text('头像已更新')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('头像已更新')));
     } on Exception catch (error) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text('选图失败:$error')));
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('选图失败:$error')));
     }
   }
 
@@ -306,6 +318,11 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// 是否已经离开底部。决定要不要显示"回到底部"按钮。
   bool _awayFromBottom = false;
+
+  /// 是否跟着新内容贴住底部。
+  ///
+  /// 默认跟;用户往上翻之后就停,滑回底部再自动恢复。
+  bool _followBottom = true;
 
   /// 上一次看到的当前会话 id。用来发现"用户换了个对话"。
   int _lastConversationId = 0;
@@ -353,7 +370,32 @@ class _ChatScreenState extends State<ChatScreen> {
     final position = _scroll.position;
     // 往上留一点余量:刚到底部时按钮不该闪出来。
     final away = position.maxScrollExtent - position.pixels > 80;
+    // 用户自己往回翻了:停止自动贴底,别抢他的滚动。
+    // 他再滑回底部就会重新跟上。
+    if (away) {
+      _followBottom = false;
+    } else if (!_followBottom) {
+      _followBottom = true;
+    }
     if (away != _awayFromBottom) setState(() => _awayFromBottom = away);
+  }
+
+  /// 内容长高了就跟着贴住底部。
+  ///
+  /// **这是"发出去的消息要手动滑才看得见"的修法。**
+  /// 原来只在发送那一刻调一次 `_scrollToBottom`,而它滚的是**下一帧**的位置;
+  /// 可新消息是在之后的状态更新里才进列表的,那一帧的 `maxScrollExtent`
+  /// 还是旧值——滚过去等于没动,新消息就落在屏幕外。
+  ///
+  /// 判断"内容变高"要靠 [ScrollMetricsNotification] 而不是控制器监听:
+  /// 列表变长时滚动位置没变,控制器的监听器根本不会被调用。
+  bool _onMetrics(ScrollMetricsNotification notification) {
+    if (!_followBottom) return false;
+    final metrics = notification.metrics;
+    // 已经在底部就不用动。
+    if (metrics.pixels >= metrics.maxScrollExtent - 2) return false;
+    _scroll.jumpTo(metrics.maxScrollExtent);
+    return false;
   }
 
   /// 离开某个会话时把当前滚动位置记下来。
@@ -387,7 +429,11 @@ class _ChatScreenState extends State<ChatScreen> {
       if (!_scroll.hasClients) return;
       final target = _scroll.position.maxScrollExtent;
       if (animate) {
-        _scroll.animateTo(target, duration: AppTheme.medium, curve: AppTheme.easeOut);
+        _scroll.animateTo(
+          target,
+          duration: AppTheme.medium,
+          curve: AppTheme.easeOut,
+        );
       } else {
         _scroll.jumpTo(target);
       }
@@ -437,31 +483,31 @@ class _ChatScreenState extends State<ChatScreen> {
           thinking: thinking,
         )
         .listen(
-      (chunk) {
-        if (!mounted) return;
-        // **不在这里 setState**。
-        //
-        // 每个分片重建整页(头部、输入框、整个消息列表)是"回答生成时页面
-        // 乱飘"的根因:几十个分片就是几十次全量重建,任何一处尺寸变化都会
-        // 被放大成抖动。正文由 _StreamingSlot 自己订阅 streamTick 重绘,
-        // 这里只负责跟随滚动。
-        if (!chunk.isReasoning) _scrollToBottom();
-      },
-      onError: (Object error) {
-        if (!mounted) return;
-        setState(() {
-          _sending = false;
-          _error = error is Exception ? error.toString() : '出错了:$error';
-        });
-      },
-      onDone: () async {
-        if (!mounted) return;
-        setState(() => _sending = false);
-        await state.commitAssistantMessage();
-        _scrollToBottom(animate: true);
-      },
-      cancelOnError: true,
-    );
+          (chunk) {
+            if (!mounted) return;
+            // **不在这里 setState**。
+            //
+            // 每个分片重建整页(头部、输入框、整个消息列表)是"回答生成时页面
+            // 乱飘"的根因:几十个分片就是几十次全量重建,任何一处尺寸变化都会
+            // 被放大成抖动。正文由 _StreamingSlot 自己订阅 streamTick 重绘,
+            // 这里只负责跟随滚动。
+            if (!chunk.isReasoning) _scrollToBottom();
+          },
+          onError: (Object error) {
+            if (!mounted) return;
+            setState(() {
+              _sending = false;
+              _error = error is Exception ? error.toString() : '出错了:$error';
+            });
+          },
+          onDone: () async {
+            if (!mounted) return;
+            setState(() => _sending = false);
+            await state.commitAssistantMessage();
+            _scrollToBottom(animate: true);
+          },
+          cancelOnError: true,
+        );
   }
 
   Future<void> _clear() async {
@@ -546,14 +592,16 @@ class _ChatScreenState extends State<ChatScreen> {
             provider: provider,
             model: state.aiConfig.model,
             // 这个对话自己的头像;没设过时回落到全局设置里那个。
-            avatar: state.currentConversationAvatar ?? state.avatarBytes,            dark: dark,
+            avatar: state.currentConversationAvatar ?? state.avatarBytes,
+            dark: dark,
             thinking: thinking,
             followingSettings: _overrideThinking == null,
             onOpenSidebar: () => _scaffoldKey.currentState?.openDrawer(),
             onEditAvatar: _editConversationAvatar,
             onPickThinking: (level) => setState(
-              () => _overrideThinking =
-                  level == state.aiConfig.thinking ? null : level,
+              () => _overrideThinking = level == state.aiConfig.thinking
+                  ? null
+                  : level,
             ),
             onClear: messages.isEmpty ? null : _clear,
           ),
@@ -567,20 +615,27 @@ class _ChatScreenState extends State<ChatScreen> {
                 // (贴在右下角空白处),也不吃高度。
                 : Stack(
                     children: [
-                      // 整页统一可选中:比每条消息各挂一套选区识别器省得多,
-                      // 而且跨消息复制本来就是更常见的需求。
-                      SelectionArea(
+                      // **SelectionArea 只包在每条消息上,不包整个列表。**
+                      //
+                      // 包在外面时它要给整个视口建选区基础设施:滚动时每帧都在
+                      // 参与命中测试与语义树构建,长列表就是持续掉帧
+                      // (用户报的"上下滑动有明显卡帧")。包进条目里之后,
+                      // 只有真正挂载的那几条参与,滚动是纯滚动。
+                      NotificationListener<ScrollMetricsNotification>(
+                        onNotification: _onMetrics,
                         child: ListView.builder(
                           controller: _scroll,
                           padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
                           // 多留一点预渲染范围:滚动时上下各半屏已经在树上了,
-                          // 手指带过去不会看到空白帧(用户报的"抽帧感")。
-                          scrollCacheExtent:
-                              const ScrollCacheExtent.viewport(1.5),
+                          // 手指带过去不会看到空白帧。
+                          scrollCacheExtent: const ScrollCacheExtent.viewport(
+                            1.0,
+                          ),
                           // 流式输出时每帧都会重建这一页。用 builder + key 让已经发出去的
                           // 消息保持原样,只重建最后那条正在生成的——否则整列气泡每帧重排,
                           // 看上去就是持续抖动。
-                          itemCount: messages.length + (state.streaming ? 1 : 0),
+                          itemCount:
+                              messages.length + (state.streaming ? 1 : 0),
                           itemBuilder: (context, index) {
                             if (index >= messages.length) {
                               // 用 AppScope.of 现取最新的 state:这一块的父级在流式期间
@@ -588,16 +643,17 @@ class _ChatScreenState extends State<ChatScreen> {
                               return const _StreamingSlot();
                             }
                             final message = messages[index];
-                            return _MessageBlock(
-                              // key 让同一批消息在重建时被复用,而不是重新挂载。
+                            return SelectionArea(
                               key: ValueKey('message-${message.id}'),
-                              message: message,
-                              provider: provider,
-                              avatar: aiAvatar,
-                              userAvatar: state.userAvatarBytes,
-                              userName: state.identityLabel,
-                              dark: dark,
-                              isLast: index == messages.length - 1,
+                              child: _MessageBlock(
+                                message: message,
+                                provider: provider,
+                                avatar: aiAvatar,
+                                userAvatar: state.userAvatarBytes,
+                                userName: state.identityLabel,
+                                dark: dark,
+                                isLast: index == messages.length - 1,
+                              ),
                             );
                           },
                         ),
@@ -620,12 +676,19 @@ class _ChatScreenState extends State<ChatScreen> {
               padding: const EdgeInsets.fromLTRB(18, 0, 18, 6),
               child: Row(
                 children: [
-                  const Icon(Icons.error_outline, size: 16, color: Color(0xFFE05252)),
+                  const Icon(
+                    Icons.error_outline,
+                    size: 16,
+                    color: Color(0xFFE05252),
+                  ),
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
                       _error!,
-                      style: const TextStyle(fontSize: 12.5, color: Color(0xFFE05252)),
+                      style: const TextStyle(
+                        fontSize: 12.5,
+                        color: Color(0xFFE05252),
+                      ),
                     ),
                   ),
                 ],
@@ -667,7 +730,8 @@ class _ChatScreenState extends State<ChatScreen> {
             onClearRange: () => setState(() => _attachRange = null),
             onAttach: _showAttachSheet,
             onMeme: _pickMeme,
-            onRemoveAttachment: (index) => setState(() => _attachments.removeAt(index)),
+            onRemoveAttachment: (index) =>
+                setState(() => _attachments.removeAt(index)),
             onSend: _send,
           ),
         ],
@@ -697,8 +761,9 @@ class _SearchStatusBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary =
-        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     return Padding(
       padding: const EdgeInsets.fromLTRB(14, 0, 14, 4),
       child: Row(
@@ -858,13 +923,16 @@ class _JumpButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary =
-        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     return Tooltip(
       message: tooltip,
       child: Material(
         // 半透明:压在消息上时要能看见底下的字,别像一块不透明的补丁。
-        color: (dark ? AppTheme.darkSurface : Colors.white).withValues(alpha: 0.86),
+        color: (dark ? AppTheme.darkSurface : Colors.white).withValues(
+          alpha: 0.86,
+        ),
         shape: const CircleBorder(),
         elevation: 2,
         child: InkWell(
@@ -947,8 +1015,12 @@ class _ChatHeader extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
 
     return Padding(
       padding: const EdgeInsets.fromLTRB(0, 6, 8, 8),
@@ -986,7 +1058,10 @@ class _ChatHeader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(model, style: TextStyle(fontSize: 12, color: textSecondary)),
+                Text(
+                  model,
+                  style: TextStyle(fontSize: 12, color: textSecondary),
+                ),
               ],
             ),
           ),
@@ -1023,7 +1098,9 @@ class _ThinkingButton extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
 
     return PopupMenuButton<ThinkingLevel>(
       onSelected: onPick,
@@ -1035,7 +1112,9 @@ class _ThinkingButton extends StatelessWidget {
             child: Row(
               children: [
                 Icon(
-                  option == level ? Icons.radio_button_checked : Icons.radio_button_off,
+                  option == level
+                      ? Icons.radio_button_checked
+                      : Icons.radio_button_off,
                   size: 18,
                   color: option == level ? AppTheme.accent : textSecondary,
                 ),
@@ -1045,7 +1124,10 @@ class _ThinkingButton extends StatelessWidget {
                   children: [
                     Text(
                       option.label,
-                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500),
+                      style: const TextStyle(
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
                     ),
                     Text(
                       option.hint,
@@ -1060,7 +1142,9 @@ class _ThinkingButton extends StatelessWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: temporary ? AppTheme.accent.withValues(alpha: 0.14) : Colors.transparent,
+          color: temporary
+              ? AppTheme.accent.withValues(alpha: 0.14)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
         ),
         child: Row(
@@ -1095,8 +1179,12 @@ class _RangeSheet extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
 
     return SafeArea(
       child: SingleChildScrollView(
@@ -1122,8 +1210,13 @@ class _RangeSheet extends StatelessWidget {
               ListTile(
                 contentPadding: EdgeInsets.zero,
                 dense: true,
-                onTap: () => Navigator.pop(context, DataRange.lastDays(entry.days)),
-                leading: Icon(Icons.calendar_today_outlined, size: 18, color: textSecondary),
+                onTap: () =>
+                    Navigator.pop(context, DataRange.lastDays(entry.days)),
+                leading: Icon(
+                  Icons.calendar_today_outlined,
+                  size: 18,
+                  color: textSecondary,
+                ),
                 title: Text(
                   entry.label,
                   style: TextStyle(fontSize: 15, color: textPrimary),
@@ -1144,7 +1237,11 @@ class _RangeSheet extends StatelessWidget {
                   DataRange.between(dayKey(picked.start), dayKey(picked.end)),
                 );
               },
-              leading: Icon(Icons.date_range_outlined, size: 18, color: textSecondary),
+              leading: Icon(
+                Icons.date_range_outlined,
+                size: 18,
+                color: textSecondary,
+              ),
               title: Text(
                 '自选起止日期',
                 style: TextStyle(fontSize: 15, color: textPrimary),
@@ -1160,7 +1257,6 @@ class _RangeSheet extends StatelessWidget {
 /// 一条已落库的消息。带思考过程时,上面挂一个可折叠的思考块。
 class _MessageBlock extends StatelessWidget {
   const _MessageBlock({
-    super.key,
     required this.message,
     required this.provider,
     required this.avatar,
@@ -1186,8 +1282,9 @@ class _MessageBlock extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Column(
-      crossAxisAlignment:
-          message.isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+      crossAxisAlignment: message.isUser
+          ? CrossAxisAlignment.end
+          : CrossAxisAlignment.start,
       children: [
         if (message.hasReasoning)
           ReasoningPanel(
@@ -1328,8 +1425,9 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary =
-        widget.dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = widget.dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     final surface = widget.dark ? AppTheme.darkSurface : AppTheme.lightSurface;
 
     return Padding(
@@ -1359,7 +1457,11 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                         child: CircularProgressIndicator(strokeWidth: 1.8),
                       )
                     else
-                      Icon(Icons.psychology_outlined, size: 15, color: textSecondary),
+                      Icon(
+                        Icons.psychology_outlined,
+                        size: 15,
+                        color: textSecondary,
+                      ),
                     const SizedBox(width: 7),
                     Text(
                       widget.live ? '思考中' : '思考过程',
@@ -1391,7 +1493,9 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                           padding: const EdgeInsets.only(top: 7),
                           child: ConstrainedBox(
                             // **高度封顶 + 内部滚动**,而不是让它随文字长高。
-                            constraints: const BoxConstraints(maxHeight: _maxHeight),
+                            constraints: const BoxConstraints(
+                              maxHeight: _maxHeight,
+                            ),
                             child: PrimaryScrollController.none(
                               // 这层 Scrollbar 必须有自己的控制器,不能借用
                               // PrimaryScrollController:外层消息列表也挂在同一个
@@ -1463,7 +1567,9 @@ class _Bubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
     // 气泡宽度上限。QQ/微信那种紧凑感来自"气泡贴着内容",所以这里比常见的
     // 0.75 再收一点:长句换行更早,但右侧留白也跟着变少。
     final maxWidth = MediaQuery.of(context).size.width * 0.68;
@@ -1471,7 +1577,10 @@ class _Bubble extends StatelessWidget {
     // 正文里可能夹着图片行(`![图] <引用>`)。要把它们**画成图**,
     // 而不是把那一行当文字显示出来——用户发的是照片,不是文件名。
     final parts = splitMessageParts(text);
-    final images = [for (final part in parts) if (part.image != null) part.image!];
+    final images = [
+      for (final part in parts)
+        if (part.image != null) part.image!,
+    ];
     final texts = [
       for (final part in parts)
         if (part.image == null && part.text.trim().isNotEmpty) part.text.trim(),
@@ -1489,7 +1598,9 @@ class _Bubble extends StatelessWidget {
       // 定成 [ChatMetrics.bubbleGap]:比微信略紧、比之前的 8 松。
       padding: const EdgeInsets.only(bottom: ChatMetrics.bubbleGap),
       child: Row(
-        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment: isUser
+            ? MainAxisAlignment.end
+            : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser) ...[
@@ -1634,23 +1745,7 @@ class _MessageImage extends StatelessWidget {
             fit: BoxFit.contain,
             errorBuilder: (context, error, stack) => _broken(context),
           )
-        : FutureBuilder<File?>(
-            future: ChatImages.file(image.fileName),
-            builder: (context, snapshot) {
-              final file = snapshot.data;
-              if (file == null) {
-                // 还没查到 / 文件不在了:先占位,避免闪一下空白。
-                return snapshot.connectionState == ConnectionState.done
-                    ? _broken(context)
-                    : const SizedBox(height: 120);
-              }
-              return Image.file(
-                file,
-                fit: BoxFit.contain,
-                errorBuilder: (context, error, stack) => _broken(context),
-              );
-            },
-          );
+        : _DiskImage(fileName: image.fileName);
 
     // 尺寸按来源分档。
     //
@@ -1675,38 +1770,106 @@ class _MessageImage extends StatelessWidget {
     );
   }
 
-  Widget _broken(BuildContext context) {
-    final textSecondary =
-        Theme.of(context).brightness == Brightness.dark
-            ? AppTheme.darkTextSecondary
-            : AppTheme.lightTextSecondary;
-    return Container(
-      width: 120,
-      height: 90,
-      alignment: Alignment.center,
-      color: Colors.black12,
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.broken_image_outlined, size: 22, color: textSecondary),
-          const SizedBox(height: 4),
-          Text(
-            '图不在了',
-            style: TextStyle(fontSize: 11.5, color: textSecondary),
-          ),
-        ],
-      ),
-    );
+  Widget _broken(BuildContext context) => _brokenBox(context);
+}
+
+/// 图片加载不出来时的占位。放在顶层:_MessageImage 和 _DiskImage 都要用。
+Widget _brokenBox(BuildContext context) {
+  final textSecondary = Theme.of(context).brightness == Brightness.dark
+      ? AppTheme.darkTextSecondary
+      : AppTheme.lightTextSecondary;
+  return Container(
+    width: 120,
+    height: 90,
+    alignment: Alignment.center,
+    color: Colors.black12,
+    child: Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Icon(Icons.broken_image_outlined, size: 22, color: textSecondary),
+        const SizedBox(height: 4),
+        Text('图不在了', style: TextStyle(fontSize: 11.5, color: textSecondary)),
+      ],
+    ),
+  );
+}
+
+/// 磁盘上的一张图,**找不到时退回内置图库的同名图**。
+///
+/// 老消息里存的是内置表情包的磁盘副本文件名,而那份副本会被系统清掉。
+/// 直接显示"图不在了"等于把用户的历史永久弄坏;而同一张图就在安装包里,
+/// 按文件名回查一次就能救回来。
+class _DiskImage extends StatefulWidget {
+  const _DiskImage({required this.fileName});
+
+  final String fileName;
+
+  @override
+  State<_DiskImage> createState() => _DiskImageState();
+}
+
+class _DiskImageState extends State<_DiskImage> {
+  File? _file;
+  Uint8List? _fallback;
+  var _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // 目录已知(测试注入过、或之前查过一次)时同步拿结果:
+    // 更快出图,而且不在测试里留下 pending timer。
+    final sync = ChatImages.fileSync(widget.fileName);
+    if (sync != null) {
+      _file = sync;
+      _done = true;
+      return;
+    }
+    unawaited(_resolve());
+  }
+
+  Future<void> _resolve() async {
+    final onDisk = await ChatImages.file(widget.fileName);
+    if (!mounted) return;
+    if (onDisk != null) {
+      setState(() {
+        _file = onDisk;
+        _done = true;
+      });
+      return;
+    }
+    // 磁盘上没有了:按文件名回查内置图库。
+    final bytes = await ChatImages.bytesOf(ChatImage(ref: widget.fileName));
+    if (!mounted) return;
+    setState(() {
+      _fallback = bytes;
+      _done = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!_done) return const SizedBox(height: 120);
+    final file = _file;
+    if (file != null) {
+      return Image.file(
+        file,
+        fit: BoxFit.contain,
+        errorBuilder: (context, error, stack) => _brokenBox(context),
+      );
+    }
+    final bytes = _fallback;
+    if (bytes != null) {
+      return Image.memory(bytes, fit: BoxFit.contain);
+    }
+    return _brokenBox(context);
   }
 }
 
 /// 点开看大图。
 Future<void> _openFullScreen(BuildContext context, ChatImage image) async {
-  await Navigator.of(context).push<void>(
-    MaterialPageRoute(
-      builder: (_) => _FullImagePage(image: image),
-    ),
-  );
+  await Navigator.of(
+    context,
+  ).push<void>(MaterialPageRoute(builder: (_) => _FullImagePage(image: image)));
 }
 
 class _FullImagePage extends StatelessWidget {
@@ -1805,14 +1968,18 @@ class _Composer extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     final attached = attachRange != null;
 
     return Container(
       decoration: BoxDecoration(
         color: surface,
         border: Border(
-          top: BorderSide(color: dark ? const Color(0xFF2A2D33) : const Color(0xFFE8E9ED)),
+          top: BorderSide(
+            color: dark ? const Color(0xFF2A2D33) : const Color(0xFFE8E9ED),
+          ),
         ),
       ),
       padding: EdgeInsets.only(
@@ -1837,7 +2004,10 @@ class _Composer extends StatelessWidget {
                   onTap: onPickRange,
                   borderRadius: BorderRadius.circular(20),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: attached
                           ? AppTheme.accent.withValues(alpha: 0.14)
@@ -1853,7 +2023,9 @@ class _Composer extends StatelessWidget {
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(
-                          attached ? Icons.check_circle : Icons.add_circle_outline,
+                          attached
+                              ? Icons.check_circle
+                              : Icons.add_circle_outline,
                           size: 13,
                           color: attached ? AppTheme.accent : textSecondary,
                         ),
@@ -1889,7 +2061,10 @@ class _Composer extends StatelessWidget {
                   onTap: onToggleWebSearch,
                   borderRadius: BorderRadius.circular(20),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 4,
+                    ),
                     decoration: BoxDecoration(
                       color: webSearch
                           ? AppTheme.accent.withValues(alpha: 0.14)
@@ -1947,7 +2122,10 @@ class _Composer extends StatelessWidget {
               // 加附件。
               IconButton(
                 onPressed: sending ? null : onAttach,
-                icon: Icon(Icons.add_photo_alternate_outlined, color: textSecondary),
+                icon: Icon(
+                  Icons.add_photo_alternate_outlined,
+                  color: textSecondary,
+                ),
                 tooltip: '加图片或文件',
               ),
               // 表情包。和"加附件"分成两个按钮:一个是发自己的文件,
@@ -2003,8 +2181,12 @@ class _AttachmentChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final surface = dark ? AppTheme.darkSurface : AppTheme.lightSurface;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
 
     // 图片/表情包直接显示**缩略图**,不是"图片 xxx.jpg"这种文件名。
     // 选了图之后要能一眼确认选的是哪张——那正是用户此刻唯一关心的事。
@@ -2151,7 +2333,9 @@ class _EmptyChat extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     return Center(
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 36),

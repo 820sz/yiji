@@ -94,23 +94,40 @@ class ChatAttachment {
 
   /// 从内置或用户自添加的表情包构造一个附件。
   ///
-  /// [bytes] 会在发送时落盘,消息里记的是那个磁盘文件名——**不用 `asset:`
-  /// 引用**。理由:渲染和"把历史图重新发给模型"这两条路只认一种引用,
-  /// 多一种分支就多一处漏判(实测用户报过"图不在了"和 AI 看不到图)。
-  /// 拿不到字节时退回 asset 引用,至少还能渲染。
+  /// **内置图一律用 `asset:` 引用,不落盘。**
+  ///
+  /// 曾经反过来做过:把内置图的字节抄一份到私有目录、消息里记那个文件名。
+  /// 那是错的——文件会被系统清掉、也可能写失败,一旦没了,那条消息就永远
+  /// 显示"图不在了",而同一张图就在安装包里躺着(用户报的正是这个)。
+  /// `asset:` 引用指向 APK 内的资源,不可能丢失。
+  ///
+  /// 用户自己发来的照片仍然落盘,它没有别的来源。
   factory ChatAttachment.meme({
     required String assetPath,
     required String caption,
     required String tag,
     Uint8List? bytes,
+    bool fromUser = false,
   }) {
+    // 用户自添加的表情包:图在私有目录里,只能靠文件名引用,
+    // 所以它必须落盘(和照片同一条路)。
+    if (fromUser) {
+      return ChatAttachment(
+        name: caption.isEmpty ? '表情包' : caption,
+        isImage: true,
+        imageBytes: bytes,
+        imageRef: '',
+        memeCaption: caption,
+        sizeBytes: bytes?.length ?? 0,
+      );
+    }
     return ChatAttachment(
       name: caption.isEmpty ? '表情包' : caption,
       isImage: true,
-      imageBytes: bytes,
-      imageRef: bytes == null ? 'asset:$assetPath' : '',
+      imageBytes: null,
+      imageRef: 'asset:$assetPath',
       memeCaption: caption,
-      sizeBytes: bytes?.length ?? 0,
+      sizeBytes: 0,
     );
   }
 

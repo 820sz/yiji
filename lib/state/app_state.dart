@@ -535,6 +535,14 @@ class AppState extends ChangeNotifier {
     return true;
   }
 
+  /// 删掉某天的想法(日历里那条删除入口走这里)。
+  Future<void> deleteJournal(String day) async {
+    // 文字和照片一起清空才算删掉:只清文字的话会留下一条"只有照片"的日记。
+    await _store.saveJournal(day, '', photoRefs: const []);
+    if (day == _currentDay) await _loadDay();
+    await loadCalendarMonth(_calendarMonth);
+  }
+
   /// 去掉今天想法里的一张照片。
   Future<void> removeJournalPhoto(String name) async {
     final existing = await _store.journalOfDay(_currentDay);

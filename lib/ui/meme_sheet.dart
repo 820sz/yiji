@@ -1,7 +1,9 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../data/chat_attachment.dart';
 import '../data/chat_images.dart';
+import 'image_cropper.dart';
 import 'theme.dart';
 
 /// 挑一张表情包。
@@ -43,6 +45,109 @@ class _MemeSheetState extends State<_MemeSheet> {
   };
 
   static String labelOf(String tag) => _tagLabels[tag] ?? tag;
+
+  /// 添加一张自己的表情包:选图 → 裁成方形 → **手填一句描述**。
+  ///
+  /// 描述是必填的,不是走过场:AI 就是靠这句话挑图的(它从清单里抄一条,
+  /// 系统按描述精确定位)。没有描述,这张图永远进不了候选清单——
+  /// 用户会以为加了却用不上,那比不给入口更糟。
+  Future<void> _addMeme() async {
+    // 把所有 BuildContext 的使用都在同一个 mounted 检查下完成:
+    // 中途 await 了好几次,用错层的 context 会被 lint 拦下来(lint 是对的)。
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final picked = await ImagePicker().pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 800,
+        maxHeight: 800,
+        imageQuality: 90,
+      );
+      if (picked == null || !mounted) return;
+      final bytes = await picked.readAsBytes();
+      if (!mounted) return;
+
+      final cropped = await showImageCropper(
+        context,
+        bytes: bytes,
+        aspect: 1,
+        withShape: false,
+      );
+      if (cropped == null || !mounted) return;
+
+      final caption = await _askCaption(context);
+      if (caption == null || caption.trim().isEmpty || !mounted) return;
+
+      final added = await ChatImages.addUserMeme(
+        bytes: cropped.bytes,
+        caption: caption.trim(),
+      );
+      if (!mounted) return;
+      if (added == null) {
+        messenger.showSnackBar(
+          const SnackBar(content: Text('这张没存上,再试一次')),
+        );
+        return;
+      }
+      // 图库换了内容,重新读一遍,新图立刻出现在面板里。
+      // addUserMeme 内部已经 invalidate 过缓存,这里拿到的是含新图的那份。
+      final refreshed = await MemeLibrary.load();
+      if (!mounted) return;
+      setState(() {
+        _library = refreshed;
+        _tag = 'mine';
+      });
+      messenger.showSnackBar(
+        const SnackBar(content: Text('加好了,AI 现在也能挑到它')),
+      );
+    } on Exception catch (error) {
+      if (!mounted) return;
+      messenger.showSnackBar(SnackBar(content: Text('加表情包失败:$error')));
+    }
+  }
+
+  /// 问用户一句描述。返回 null 表示他取消了。
+  Future<String?> _askCaption(BuildContext context) async {
+    final controller = TextEditingController();
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('给它写一句描述'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              'AI 靠这句话认图——它挑图时就是从这些描述里选一条。'
+              '写清"画面里是什么、什么情绪"最好用。',
+              style: TextStyle(fontSize: 12.5, height: 1.5),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: controller,
+              autofocus: true,
+              maxLines: 3,
+              minLines: 2,
+              decoration: const InputDecoration(
+                hintText: '比如:抱着抱枕打滚笑,开心到冒泡',
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, controller.text),
+            child: const Text('加进图库'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+    return result;
+  }
 
   @override
   void initState() {
@@ -113,6 +218,17 @@ class _MemeSheetState extends State<_MemeSheet> {
                   ),
                 ),
                 const Spacer(),
+                // 添加自己的表情包。
+                //
+                // 存储和匹配两层早就做好了(addUserMeme / 图库合并 / AI 清单
+                // 跟着变),但**一直没有入口**——用户说"表情包添加功能也没有",
+                // 就是这里缺的。
+                IconButton(
+                  onPressed: _addMeme,
+                  icon: const Icon(Icons.add_photo_alternate_outlined, size: 20),
+                  tooltip: '添加自己的表情包',
+                  visualDensity: VisualDensity.compact,
+                ),
                 Text(
                   '共 ${library.memes.length} 张',
                   style: TextStyle(fontSize: 12, color: textSecondary),
@@ -153,11 +269,11 @@ class _MemeSheetState extends State<_MemeSheet> {
               itemBuilder: (context, index) {
                 final meme = memes[index];
                 return GestureDetector(
-                  // 点的时候把字节读出来一起带走。理由见 ChatAttachment.meme:
-                  // 消息里统一记磁盘文件名,而不是两种引用并存——两种引用
-                  // 已经害得用户见过"图不在了"和"AI 看不到图"。
+                  // 内置图直接用 asset 引用带走,不读字节、不落盘。
+                  // 用户自添加的图在私有目录里,只能靠文件名引用,所以要读字节。
                   onTap: () async {
-                    final bytes = await ChatImages.memeBytes(meme);
+                    final bytes =
+                        meme.fromUser ? await ChatImages.memeBytes(meme) : null;
                     if (!context.mounted) return;
                     Navigator.pop(
                       context,
@@ -166,6 +282,7 @@ class _MemeSheetState extends State<_MemeSheet> {
                         caption: meme.caption,
                         tag: meme.tag,
                         bytes: bytes,
+                        fromUser: meme.fromUser,
                       ),
                     );
                   },

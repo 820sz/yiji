@@ -176,6 +176,13 @@ class MemeLibrary {
 
   static MemeLibrary? _cached;
 
+  /// 直接给定图库(测试用)。
+  ///
+  /// widget 测试里 `rootBundle.loadString` 会**永远不返回**(不打日志也不报错),
+  /// 所以不能靠等真实读取来准备图库——等它只会把用例挂死或者拿到空库。
+  /// 测试把已经解析好的那份塞进来。
+  static void primeForTest(MemeLibrary library) => _cached = library;
+
   /// 读图库:**内置 + 用户自添加合并**。
   ///
   /// 读不到内置素材时返回空图库(某些构建变体没打包),不该让聊天崩掉;
@@ -186,10 +193,14 @@ class MemeLibrary {
 
     var builtin = const <Meme>[];
     try {
-      final raw = await rootBundle.loadString(_indexPath);
+      // **必须带超时**:资源读取卡住时那个 Future 既不打日志也不报错,
+      // 就是永远不完成。没有超时的话整条调用链都会停在这里。
+      final raw = await rootBundle
+          .loadString(_indexPath)
+          .timeout(const Duration(seconds: 5));
       builtin = parseIndex(jsonDecode(raw));
     } catch (_) {
-      // 素材没打进包:表情包功能静默不可用,其余聊天功能照常。
+      // 素材没打进包、或者读取卡住:表情包功能静默不可用,其余聊天功能照常。
     }
 
     final user = await ChatImages.loadUserMemes();
@@ -489,14 +500,35 @@ class ChatImages {
   }
 
   /// 取一张已保存的图。不存在返回 null。
+  /// 取磁盘上的一张图。取不到就返回 null。
+  ///
+  /// 这里**不加 `.timeout`**:超时会挂一个定时器,而渲染是每帧都可能走的路径,
+  /// 定时器还没回收就被拆掉时测试会直接报 "Pending timers"。
+  /// 目录查找本身失败会抛异常,那条路由 catch 兜住。
   static Future<File?> file(String name) async {
     try {
       final directory = await dir();
       final file = File(p.join(directory.path, name));
       return await file.exists() ? file : null;
-    } on Exception {
+    } catch (_) {
       return null;
     }
+  }
+
+  /// 同步版的 [file]。
+  ///
+  /// 目录已经知道时(测试注入了 [_override],或者之前查过一次)不必走异步:
+  /// 少一次事件循环往返,渲染时能更快出图,也**不会在测试里留下 pending timer**
+  /// (`Future.timeout` 会挂一个定时器,测试结束前没回收就直接报错)。
+  static File? fileSync(String name) {
+    final cached = _dir;
+    final override = _override;
+    final base = cached ?? override;
+    if (base == null) return null;
+    final target = cached == null
+        ? File(p.join(base.path, 'chat_images', name))
+        : File(p.join(base.path, name));
+    return target.existsSync() ? target : null;
   }
 
   /// 把消息文本里所有图片行的字节读成 data URL,供多模态请求使用。
@@ -519,6 +551,13 @@ class ChatImages {
   }
 
   /// 取一张图的原始字节:内置的走 asset,用户自添加的走磁盘。
+  ///
+  /// 磁盘文件找不到时**回退到内置图库的同名图**。
+  ///
+  /// 这条回退是给老消息用的:以前内置表情包会被抄一份到私有目录、
+  /// 消息里记那个文件名;那份文件被系统清掉之后,那条消息就永远显示
+  /// "图不在了",而同一张图明明就在安装包里。现在按文件名回查一次图库,
+  /// 老消息自己就好了——用户不用做任何事。
   static Future<Uint8List?> bytesOf(ChatImage image) async {
     try {
       if (image.isAsset) {
@@ -526,11 +565,36 @@ class ChatImages {
         return data.buffer.asUint8List();
       }
       final onDisk = await file(image.fileName);
-      return await onDisk?.readAsBytes();
+      final bytes = await onDisk?.readAsBytes();
+      if (bytes != null && bytes.isNotEmpty) return bytes;
+      return await _builtinFallback(image.fileName);
     } catch (_) {
       return null;
     }
   }
+
+  /// 按文件名在图库里找同名的那张内置图。
+  static Future<Uint8List?> _builtinFallback(String fileName) async {
+    try {
+      // 图库本身可能卡住(资源读取),不能让它拖住渲染。
+      final library = await MemeLibrary.load().timeout(
+        const Duration(seconds: 3),
+      );
+      for (final meme in library.memes) {
+        if (meme.fromUser) continue;
+        if (meme.file == fileName || meme.file.endsWith('/$fileName')) {
+          final data = await rootBundle
+              .load('assets/${meme.assetPath}')
+              .timeout(const Duration(seconds: 3));
+          return data.buffer.asUint8List();
+        }
+      }
+    } catch (_) {
+      // 图库读不出来只是少一条退路,不影响别处。
+    }
+    return null;
+  }
+
   static String _mimeOf(ChatImage image) {
     final name = image.isAsset ? image.assetPath : image.fileName;
     final ext = p.extension(name).toLowerCase();

@@ -166,6 +166,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       journals: state.monthJournals,
                       dark: dark,
                       onTapDay: (day) => showDayEditor(context, day),
+                      onDeleteDay: (day) => state.deleteJournal(day),
                     ),
                   ],
                 ],
@@ -348,12 +349,16 @@ class _MonthJournalList extends StatelessWidget {
     required this.journals,
     required this.dark,
     required this.onTapDay,
+    required this.onDeleteDay,
   });
 
   /// 键是 `YYYY-MM-DD`,值是那天的想法正文。
   final Map<String, String> journals;
   final bool dark;
   final ValueChanged<String> onTapDay;
+
+  /// 删掉某天的想法。
+  final Future<void> Function(String day) onDeleteDay;
 
   @override
   Widget build(BuildContext context) {
@@ -386,6 +391,9 @@ class _MonthJournalList extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: InkWell(
               onTap: () => onTapDay(day),
+              // 长按删除。用户问"日历里记录的想法为什么没法删除?"——
+              // 之前确实一条路都没有,写错了只能去改文字、改不掉整条。
+              onLongPress: () => _confirmDelete(context, day),
               borderRadius: BorderRadius.circular(10),
               child: Container(
                 width: double.infinity,
@@ -397,11 +405,29 @@ class _MonthJournalList extends StatelessWidget {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      shortDateLabel(day),
-                      style: TextStyle(fontSize: 11.5, color: textSecondary),
+                    Row(
+                      children: [
+                        Text(
+                          shortDateLabel(day),
+                          style: TextStyle(fontSize: 11.5, color: textSecondary),
+                        ),
+                        const Spacer(),
+                        // 显式的删除按钮:长按不是所有人都知道。
+                        InkWell(
+                          onTap: () => _confirmDelete(context, day),
+                          customBorder: const CircleBorder(),
+                          child: Padding(
+                            padding: const EdgeInsets.all(4),
+                            child: Icon(
+                              Icons.delete_outline,
+                              size: 17,
+                              color: textSecondary,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
-                    const SizedBox(height: 3),
+                    const SizedBox(height: 1),
                     Text(
                       journals[day]!,
                       // 正文截几行了事:这里是一份"这个月都想了什么"的索引,
@@ -417,6 +443,32 @@ class _MonthJournalList extends StatelessWidget {
           ),
       ],
     );
+  }
+
+  /// 删除前确认一次。日记删了找不回来,不该一下点掉。
+  Future<void> _confirmDelete(BuildContext context, String day) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('删掉这天的想法?'),
+        content: Text(
+          '${shortDateLabel(day)}记的想法会被清掉,删了找不回来。',
+          style: const TextStyle(fontSize: 13.5, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('删除'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await onDeleteDay(day);
   }
 }
 
