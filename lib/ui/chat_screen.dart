@@ -2005,12 +2005,13 @@ class _DiskImageState extends State<_DiskImage> {
   File? _file;
   Uint8List? _fallback;
   var _done = false;
+  String _why = '';
 
   @override
   void initState() {
     super.initState();
-    // 目录已知(测试注入过、或之前查过一次)时同步拿结果:
-    // 更快出图,而且不在测试里留下 pending timer。
+    // 同步能出结果就绝不等异步:目录已知时这里一次就定下来了,
+    // 不必经过"转圈 → 一帧后才有内容"的过程。
     final sync = ChatImages.fileSync(widget.fileName);
     if (sync != null) {
       _file = sync;
@@ -2021,34 +2022,61 @@ class _DiskImageState extends State<_DiskImage> {
   }
 
   Future<void> _resolve() async {
-    final onDisk = await ChatImages.file(widget.fileName);
-    if (!mounted) return;
-    if (onDisk != null) {
-      setState(() {
-        _file = onDisk;
-        _done = true;
-      });
-      return;
+    // **全程带超时**:目录查询或回查卡住时,不能永远停在空白占位上——
+    // 那既不显示图、也不报错,用户只看到一片灰。
+    const budget = Duration(seconds: 3);
+    String why = '';
+    try {
+      final onDisk = await ChatImages.file(widget.fileName).timeout(budget);
+      if (!mounted) return;
+      if (onDisk != null) {
+        setState(() {
+          _file = onDisk;
+          _done = true;
+        });
+        return;
+      }
+      why = '磁盘上没这个文件';
+    } catch (_) {
+      why = '查磁盘超时(3 秒)';
     }
+
     // 磁盘上没有了:按文件名回查内置图库。
-    final bytes = await ChatImages.bytesOf(ChatImage(ref: widget.fileName));
+    Uint8List? bytes;
+    try {
+      bytes = await ChatImages.bytesOf(
+        ChatImage(ref: widget.fileName),
+      ).timeout(budget);
+    } catch (_) {
+      why = '$why;回查图库超时';
+    }
     if (!mounted) return;
     setState(() {
       _fallback = bytes;
+      _why = bytes == null ? '$why,图库里也没有同名的内置图' : '';
       _done = true;
     });
   }
 
   @override
   Widget build(BuildContext context) {
-    if (!_done) return const SizedBox(height: 120);
+    if (!_done) {
+      return const SizedBox(
+        width: 120,
+        height: 90,
+        child: Center(child: CircularProgressIndicator(strokeWidth: 2)),
+      );
+    }
     final file = _file;
     if (file != null) {
       return Image.file(
         file,
         fit: BoxFit.contain,
-        errorBuilder: (context, error, stack) =>
-            _brokenBox(context, ref: widget.fileName, why: '文件读不出来:$error'),
+        errorBuilder: (context, error, stack) => _brokenBox(
+          context,
+          ref: widget.fileName,
+          why: '文件读不出来:$error',
+        ),
       );
     }
     final bytes = _fallback;
@@ -2058,7 +2086,7 @@ class _DiskImageState extends State<_DiskImage> {
     return _brokenBox(
       context,
       ref: widget.fileName,
-      why: '磁盘上没有这个文件,图库里也没有同名的内置图',
+      why: _why.isEmpty ? '磁盘上没有这个文件' : _why,
     );
   }
 }

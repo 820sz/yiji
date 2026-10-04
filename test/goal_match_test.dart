@@ -7,6 +7,7 @@ import 'package:yiji/ai/ai_client.dart';
 import 'package:yiji/ai/goal_matcher.dart';
 import 'package:yiji/ai/prompts.dart';
 import 'package:yiji/ai/settings_store.dart';
+import 'package:yiji/core/day.dart';
 import 'package:yiji/data/goals.dart';
 import 'package:yiji/data/models.dart';
 import 'package:yiji/data/palette.dart';
@@ -85,7 +86,9 @@ Goal readingGoal({String unit = '', double? target}) => Goal(
 
 Task readingTask() => Task(
       id: 3,
-      day: '2026-09-29',
+      // 用真实的今天:写死日期的话,一旦运行日期走出那一周,
+      // `mondayOf(今天)` 算出的窗口就把这条任务挡在外面,用例会自己烂掉(踩过)。
+      day: todayKey(),
       text: '读到第 30 页',
       done: true,
       sortOrder: 0,
@@ -295,7 +298,7 @@ void main() {
 
     test('做完的事没被追踪时,会建议建一个新目标', () async {
       // 用户改了名字但没建目标的典型情形:读了一周的书,进度里一片空白。
-      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final task = store.seedTask(todayKey(), '读书 30 页');
       final state = await boot(
         '{"matches":[],"newGoals":[{"task":1,"title":"读书",'
         '"unit":"页","reason":"这周在读,但没在追踪"}]}',
@@ -313,7 +316,7 @@ void main() {
     });
 
     test('确认后目标被建出来,并且这次的数量已经记上', () async {
-      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final task = store.seedTask(todayKey(), '读书 30 页');
       final state = await boot(
         '{"matches":[],"newGoals":[{"task":1,"title":"读书",'
         '"unit":"页","reason":"在读了"}]}',
@@ -335,7 +338,7 @@ void main() {
     });
 
     test('不勾选就不会建', () async {
-      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final task = store.seedTask(todayKey(), '读书 30 页');
       final state = await boot(
         '{"matches":[],"newGoals":[{"task":1,"title":"读书","unit":"页"}]}',
       );
@@ -352,7 +355,7 @@ void main() {
     test('已经算进某条推进条的事,不会再被建议新建', () async {
       // 否则同一件事会被记两次:一次算进老目标,一次算进新建的。
       store.seedGoal(title: '小说推进', unit: '字', target: 10000, current: 0);
-      final task = store.seedTask('2026-09-29', '码字2k');
+      final task = store.seedTask(todayKey(), '码字2k');
       final state = await boot(
         '{"matches":[{"task":1,"goal":1,"amount":2000,"unit":"字"}],'
         '"newGoals":[{"task":1,"title":"写作","unit":"字"}]}',
@@ -370,7 +373,7 @@ void main() {
     });
 
     test('越界或没标题的建议被丢掉', () async {
-      final task = store.seedTask('2026-09-29', '读书 30 页');
+      final task = store.seedTask(todayKey(), '读书 30 页');
       final state = await boot(
         '{"matches":[],"newGoals":['
         '{"task":9,"title":"不存在的待办"},'
@@ -424,7 +427,7 @@ void main() {
     test('勾完待办就自动给出建议,不用用户去点同步', () async {
       // 目标是「读《义忆》」,没有目标值——就是用户说的那种推进条。
       store.seedGoal(title: '读《义忆》', unit: '', target: 0, current: 0);
-      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final task = store.seedTask(todayKey(), '读到第 30 页');
       final state = await boot(
         reply: '{"matches":[{"task":1,"goal":1,"amount":30,"unit":"页",'
             '"reason":"写了读到第 30 页"}]}',
@@ -440,7 +443,7 @@ void main() {
 
     test('确认后进度真的前进,并补上缺的单位', () async {
       store.seedGoal(title: '读《义忆》', unit: '', target: 0, current: 0);
-      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final task = store.seedTask(todayKey(), '读到第 30 页');
       final state = await boot(
         reply: '{"matches":[{"task":1,"goal":1,"amount":30,"unit":"页"}]}',
       );
@@ -458,7 +461,7 @@ void main() {
     test('没配 key 时不发请求', () async {
       SharedPreferences.setMockInitialValues({});
       store.seedGoal(title: '读《义忆》', unit: '页', current: 0);
-      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final task = store.seedTask(todayKey(), '读到第 30 页');
       ai = _JsonAi('{"matches":[]}');
       final state = AppState(
         store: store,
@@ -484,7 +487,7 @@ void main() {
       // 这份建议是一次付费 API 调用的产物。误触遮罩/下拉关掉面板就把它清空的话,
       // 用户只能再花钱重跑一遍。
       store.seedGoal(title: '读《义忆》', unit: '页', current: 0);
-      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final task = store.seedTask(todayKey(), '读到第 30 页');
       final state = await boot(
         reply: '{"matches":[{"task":1,"goal":1,"amount":30,"unit":"页"}]}',
       );
@@ -499,7 +502,7 @@ void main() {
 
     test('一条待办只会被算一次', () async {      // 用户最可能做的动作是取消勾选再勾回来。那样不该又加 30 页。
       store.seedGoal(title: '读《义忆》', unit: '页', current: 0);
-      final task = store.seedTask('2026-09-29', '读到第 30 页');
+      final task = store.seedTask(todayKey(), '读到第 30 页');
       final state = await boot(
         reply: '{"matches":[{"task":1,"goal":1,"amount":30,"unit":"页"}]}',
       );

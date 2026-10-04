@@ -25,8 +25,14 @@ class ChatImage {
   /// 包内路径(仅 [isAsset] 时有意义)。
   String get assetPath => ref.substring('asset:'.length);
 
-  /// 本地文件(仅 [isAsset] 为假时有意义)。
-  String get fileName => ref;
+  /// 文件名(不带目录、不带 `asset:` 前缀)。
+  ///
+  /// **内置引用也要靠它查磁盘**:以前这里直接返回整串 `ref`,于是拿它去查
+  /// 文件时得到的是 `asset:memes/daily/x.webp` 这种"文件名",必然找不到。
+  /// 用户报的"图不在了"里,那串诊断就写着这件事——
+  /// `按文件名「asset:memes/daily/x.webp」…都没找到`。
+  String get fileName =>
+      isAsset ? assetPath.split('/').last : ref.split(RegExp(r'[/\\]')).last;
 
   /// 解析用:不是标记行返回 null。
   static ChatImage? parse(String line) {
@@ -525,10 +531,22 @@ class ChatImages {
     final override = _override;
     final base = cached ?? override;
     if (base == null) return null;
-    final target = cached == null
-        ? File(p.join(base.path, 'chat_images', name))
-        : File(p.join(base.path, name));
+    // 走的是和 dir() 同一套布局:`<根>/chat_images/<名>`,不是把根当目录。
+    // 这里曾经把 override 直接当目录用,于是测试里文件写在一处、渲染找另一处。
+    final target = File(p.join(base.path, 'chat_images', name));
     return target.existsSync() ? target : null;
+  }
+
+  /// **测试用**:把目录解析固定下来,让同步路径立刻可用。
+  ///
+  /// widget 测试里 `getApplicationSupportDirectory()` 背后的平台通道不响应,
+  /// 目录查询既不返回也不报错,`_DiskImage` 于是永远停在转圈上——
+  /// 那是测试环境的性质,不是产品缺陷。给它一个确定的目录,测试才谈得上"验渲染"。
+  static void pinDirectoryForTest(Directory dir) {
+    _override = dir;
+    _dir = Directory(p.join(dir.path, 'chat_images'));
+    _avatarDir = null;
+    _userMemeDir = null;
   }
 
   /// 把消息文本里所有图片行的字节读成 data URL,供多模态请求使用。
