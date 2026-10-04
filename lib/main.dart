@@ -5,6 +5,7 @@ import 'package:flutter_localizations/flutter_localizations.dart';
 import 'state/app_state.dart';
 import 'ui/calendar_screen.dart';
 import 'ui/chat_screen.dart';
+import 'ui/farewell.dart';
 import 'ui/profile_screen.dart';
 import 'ui/progress_screen.dart';
 import 'ui/splash_screen.dart';
@@ -120,6 +121,25 @@ class _HomeShellState extends State<HomeShell> {
 
   @override
   Widget build(BuildContext context) {
+    // 系统返回键先从"回第一个页签"开始:用户在聊天页按返回,
+    // 期待的是回到主页面,而不是直接被关掉应用。
+    return PopScope(
+      canPop: false,
+      onPopInvokedWithResult: (didPop, _) async {
+        if (didPop) return;
+        if (_index != 0) {
+          setState(() => _index = 0);
+          return;
+        }
+        // 已经在第一个页签了,再按一次就是要退出:给一个道别。
+        final leave = await showFarewell(context);
+        if (leave) await exitApp();
+      },
+      child: _shell(context),
+    );
+  }
+
+  Widget _shell(BuildContext context) {
     return Scaffold(
       // 上下都让开系统栏:上面是状态栏/刘海,下面是手势条——
       // 不让下面的话,待办页的浮动按钮会压在手势条上,点起来别扭。

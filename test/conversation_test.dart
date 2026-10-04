@@ -13,6 +13,7 @@ import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
 import 'package:yiji/ui/calendar_screen.dart';
+import 'package:yiji/ui/status_curve.dart';
 
 import 'support/fake_store.dart';
 
@@ -364,19 +365,43 @@ void main() {
       );
     });
 
-    testWidgets('记过的想法能在日历里看到', (tester) async {
+    testWidgets('记过的想法能在日历里看到(默认折叠)', (tester) async {
       // 用户原话:"日历里,无法看到记录过的'今日感想'"。
-      // 只给格子点个小点不够——想法是要读的,所以正文要列出来。
+      // 后来又补了一条:"这月记的想法(默认折叠收起)"——日历的主体是日期,
+      // 一屏里先看到的应该是格子。
       await store.saveJournal(today, '今天想通了一件事:情节是为了展现人物。');
       await pumpApp(tester, withKey: false);
       await openTab(tester, '日历');
 
+      // 标题和天数要看得见,不然用户不知道这里有东西。
+      expect(find.textContaining('这月记的想法'), findsOneWidget);
+      // 正文默认不展开。
+      expect(
+        find.textContaining('情节是为了展现人物'),
+        findsNothing,
+        reason: '默认应当是折叠的',
+      );
+
+      // 点标题展开。
+      await tester.tap(find.textContaining('这月记的想法'));
+      await tester.pumpAndSettle();
       expect(
         find.textContaining('情节是为了展现人物'),
         findsOneWidget,
-        reason: '记录过的想法应当直接显示在日历里,而不是只能点进某一天才看到',
+        reason: '展开后应当能看到想法正文',
       );
-      expect(find.textContaining('这月记的想法'), findsOneWidget);
+    });
+
+    testWidgets('状态曲线在日历底部,默认近七天', (tester) async {
+      // 用户要求:"根据近期每日任务完成率绘制曲线,纵轴 0/25/50/75/100%,
+      // 横轴日期,范围自选,默认近七天"。
+      store.seedTask(today, '任务', done: true);
+      await pumpApp(tester, withKey: false);
+      await openTab(tester, '日历');
+
+      expect(find.text('状态曲线'), findsOneWidget);
+      expect(find.text('近 7 天'), findsOneWidget, reason: '默认范围应当是近七天');
+      expect(find.byType(StatusCurve), findsOneWidget);
     });
 
     testWidgets('没记过想法的月份不显示那一块', (tester) async {

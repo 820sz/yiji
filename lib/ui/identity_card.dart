@@ -57,11 +57,13 @@ class IdentityCard extends StatelessWidget {
               ),
             ),
             Padding(
-              padding: const EdgeInsets.fromLTRB(18, 18, 10, 18),
+              // 名片整体放大一档:用户说"个人名片可以再大一丢丢"。
+              // 加在留白和字号上而不是硬撑高度——撑高度只会显得空。
+              padding: const EdgeInsets.fromLTRB(20, 22, 12, 22),
               child: Row(
                 children: [
                   _AvatarButton(state: state),
-                  const SizedBox(width: 14),
+                  const SizedBox(width: 16),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -78,7 +80,7 @@ class IdentityCard extends StatelessWidget {
                                   maxLines: 1,
                                   overflow: TextOverflow.ellipsis,
                                   style: const TextStyle(
-                                    fontSize: 21,
+                                    fontSize: 23,
                                     fontWeight: FontWeight.w700,
                                     height: 1.15,
                                     color: Colors.white,
@@ -103,8 +105,8 @@ class IdentityCard extends StatelessWidget {
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
-                              fontSize: 13,
-                              height: 1.4,
+                              fontSize: 13.5,
+                              height: 1.45,
                               color: Colors.white.withValues(
                                 alpha: state.bio.trim().isEmpty ? 0.65 : 0.9,
                               ),
@@ -254,7 +256,7 @@ class _AvatarButton extends StatelessWidget {
             child: UserAvatar(
               bytes: state.userAvatarBytes,
               name: state.identityLabel,
-              size: 58,
+              size: 68,
               shape: state.userAvatarShape,
             ),
           ),

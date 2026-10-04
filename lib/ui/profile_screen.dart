@@ -136,6 +136,13 @@ class ProfileScreen extends StatelessWidget {
           dark: dark,
           onTap: () => _editSplashText(context),
         ),
+        _Tile(
+          icon: Icons.nightlight_outlined,
+          title: '退出语录',
+          subtitle: state.farewellText,
+          dark: dark,
+          onTap: () => _editFarewellText(context),
+        ),
         const SizedBox(height: 18),
         _SectionTitle('关于'),
         // 有新版本时,把入口**提到最显眼的位置**并标出来。
@@ -226,6 +233,23 @@ class ProfileScreen extends StatelessWidget {
       ),
     );
     if (result != null) await state.saveSplashText(result);
+  }
+
+  /// 改退出时那句话。
+  ///
+  /// 和开屏文案同一套:留空就回到默认的「今天辛苦啦~」。
+  Future<void> _editFarewellText(BuildContext context) async {
+    final state = AppScope.of(context);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (context) => TextPromptDialog(
+        title: '退出语录',
+        initialValue: state.farewellText,
+        hintText: defaultFarewellText,
+        maxLength: 24,
+      ),
+    );
+    if (result != null) await state.saveFarewellText(result);
   }
 
   /// 选思考强度。跟聊天页那个临时选择是同一组档位,这里是全局默认值。

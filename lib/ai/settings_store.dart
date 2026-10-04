@@ -21,6 +21,7 @@ class SettingsStore {
   static const _keyBio = 'user_bio';
   static const _keyDarkMode = 'ui_dark_mode';
   static const _keySplashText = 'ui_splash_text';
+  static const _keyFarewellText = 'ui_farewell_text';
 
   /// 开屏那句话的默认值。
   static const defaultSplashText = '小习惯、大不同';
@@ -119,4 +120,19 @@ class SettingsStore {
   Future<void> saveSplashText(String text) async {
     await _prefs.setString(_keySplashText, text.trim());
   }
+
+  /// 退出时那句话。留空时回到默认文案。
+  ///
+  /// 和开屏文案一样可自定义:用户明确要求"退出时一个支持自定义的弹窗语录"。
+  String get farewellText {
+    final text = _prefs.getString(_keyFarewellText)?.trim() ?? '';
+    return text.isEmpty ? defaultFarewellText : text;
+  }
+
+  Future<void> saveFarewellText(String text) async {
+    await _prefs.setString(_keyFarewellText, text.trim());
+  }
 }
+
+/// 没自定义过时,退出弹窗上显示的话。
+const defaultFarewellText = '今天辛苦啦~';

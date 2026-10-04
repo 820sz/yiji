@@ -190,6 +190,14 @@ class AppState extends ChangeNotifier {
   /// 开屏那句话。
   String get splashText => _settings.splashText;
 
+  /// 退出弹窗上那句话。
+  String get farewellText => _settings.farewellText;
+
+  Future<void> saveFarewellText(String text) async {
+    await _settings.saveFarewellText(text);
+    notifyListeners();
+  }
+
   /// 报告草稿:AI 生成后缓存在这里,导出优先用它。
   String _weekDraft = '';
   String get weekDraft => _weekDraft;
@@ -638,6 +646,19 @@ class AppState extends ChangeNotifier {
   /// 当前月份里每天的"今日想法"。键是 `YYYY-MM-DD`。
   Map<String, String> _monthJournals = const {};
   Map<String, String> get monthJournals => _monthJournals;
+
+  /// 一段区间里每天的完成情况。键是 `YYYY-MM-DD`。
+  Map<String, DayCount> _rangeCounts = const {};
+  Map<String, DayCount> get rangeCounts => _rangeCounts;
+
+  /// 读一段区间的每日完成率(状态曲线用)。
+  ///
+  /// 和 [loadCalendarMonth] 分开:曲线的范围是用户自选的,可能跨月,
+  /// 而日历那个只关心当月——混在一起的话翻月会把曲线要的数据冲掉。
+  Future<void> loadRangeCounts(String startDay, String endDay) async {
+    _rangeCounts = await _store.taskCountsByDay(startDay, endDay);
+    notifyListeners();
+  }
 
   Future<void> shiftCalendarMonth(int delta) {
     final date = parseDayKey(_calendarMonth);

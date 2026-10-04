@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import '../core/day.dart';
 import '../data/record_store.dart';
 import '../state/app_state.dart';
+import 'status_curve.dart';
 import 'task_sheets.dart';
 import 'theme.dart';
 
@@ -43,8 +44,12 @@ class _CalendarScreenState extends State<CalendarScreen> {
   Widget build(BuildContext context) {
     final state = AppScope.of(context);
     final dark = Theme.of(context).brightness == Brightness.dark;
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
 
     final anchor = state.calendarMonth;
     final cells = monthGrid(anchor);
@@ -147,8 +152,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
                               day: cells[row * 7 + col],
                               isToday: cells[row * 7 + col] == today,
                               count: state.monthCounts[cells[row * 7 + col]],
-                              hasJournal: state.monthJournals
-                                  .containsKey(cells[row * 7 + col]),
+                              hasJournal: state.monthJournals.containsKey(
+                                cells[row * 7 + col],
+                              ),
                               dark: dark,
                               onTap: (day) => showDayEditor(context, day),
                             ),
@@ -160,6 +166,7 @@ class _CalendarScreenState extends State<CalendarScreen> {
                   // 用户要求"日历里无法看到记录过的'今日感想'"。做在格子下面
                   // 而不是塞进格子里:格子里只剩 62 像素,放不下正文,
                   // 而感想是要读的,不是要一个"有"的标记。
+                  // **默认折叠**:日历的主体是日期,一屏里先看到日期。
                   if (state.monthJournals.isNotEmpty) ...[
                     const SizedBox(height: 14),
                     _MonthJournalList(
@@ -169,6 +176,9 @@ class _CalendarScreenState extends State<CalendarScreen> {
                       onDeleteDay: (day) => state.deleteJournal(day),
                     ),
                   ],
+                  // 状态曲线:每天的完成率折线,范围可自选(默认近七天)。
+                  const SizedBox(height: 14),
+                  StatusCurve(dark: dark),
                 ],
               ),
             ),
@@ -202,8 +212,12 @@ class _DayCell extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final textSecondary = dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
 
     if (day == null) {
       return const SizedBox(height: 62);
@@ -253,8 +267,8 @@ class _DayCell extends StatelessWidget {
                         color: isToday
                             ? Colors.white
                             : (future
-                                ? textSecondary.withValues(alpha: 0.65)
-                                : textPrimary),
+                                  ? textSecondary.withValues(alpha: 0.65)
+                                  : textPrimary),
                       ),
                     ),
                   ),
@@ -320,21 +334,21 @@ class CalendarDayDot extends StatelessWidget {
       // 嵌在日期下面基本看不清是勾还是点——而它承载的是"这天做完了没有"
       // 这个核心信息,不该省这点地方。
       DayProgress.all => const Icon(
-          Icons.check,
-          size: 17,
-          color: AppTheme.accent,
-        ),
+        Icons.check,
+        size: 17,
+        color: AppTheme.accent,
+      ),
       // 半勾:空心勾套一个实心下半部,视觉上就是"勾了一半"。
       DayProgress.half => const Icon(
-          Icons.check_circle_outline,
-          size: 17,
-          color: AppTheme.doneText,
-        ),
+        Icons.check_circle_outline,
+        size: 17,
+        color: AppTheme.doneText,
+      ),
       DayProgress.few => Icon(
-          Icons.close,
-          size: 17,
-          color: AppTheme.doneText.withValues(alpha: 0.75),
-        ),
+        Icons.close,
+        size: 17,
+        color: AppTheme.doneText.withValues(alpha: 0.75),
+      ),
     };
   }
 }
@@ -344,7 +358,7 @@ class CalendarDayDot extends StatelessWidget {
 /// 用户原话:"日历里,无法看到记录过的'今日感想'"。只给格子点个小点不够
 /// ——想法是要读的,不是要知道"有没有"。所以这里把正文列出来,点一条
 /// 能进那天的编辑页。
-class _MonthJournalList extends StatelessWidget {
+class _MonthJournalList extends StatefulWidget {
   const _MonthJournalList({
     required this.journals,
     required this.dark,
@@ -361,86 +375,131 @@ class _MonthJournalList extends StatelessWidget {
   final Future<void> Function(String day) onDeleteDay;
 
   @override
+  State<_MonthJournalList> createState() => _MonthJournalListState();
+}
+
+class _MonthJournalListState extends State<_MonthJournalList> {
+  /// **默认收起**。用户明确要求"默认折叠收起"——日历的主体是日期,
+  /// 一屏里先看到的应该是格子,想法想读再展开。
+  var _expanded = false;
+
+  @override
   Widget build(BuildContext context) {
-    final textPrimary = dark ? AppTheme.darkTextPrimary : AppTheme.lightTextPrimary;
-    final textSecondary =
-        dark ? AppTheme.darkTextSecondary : AppTheme.lightTextSecondary;
+    final dark = widget.dark;
+    final journals = widget.journals;
+    final textPrimary = dark
+        ? AppTheme.darkTextPrimary
+        : AppTheme.lightTextPrimary;
+    final textSecondary = dark
+        ? AppTheme.darkTextSecondary
+        : AppTheme.lightTextSecondary;
     // 按日期倒序:最近写的在最上面。
     final days = journals.keys.toList()..sort((a, b) => b.compareTo(a));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Row(
-          children: [
-            Icon(Icons.edit_note, size: 16, color: textSecondary),
-            const SizedBox(width: 6),
-            Text(
-              '这月记的想法(${days.length} 天)',
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: textSecondary,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 6),
-        for (final day in days)
-          Padding(
-            padding: const EdgeInsets.only(bottom: 8),
-            child: InkWell(
-              onTap: () => onTapDay(day),
-              // 长按删除。用户问"日历里记录的想法为什么没法删除?"——
-              // 之前确实一条路都没有,写错了只能去改文字、改不掉整条。
-              onLongPress: () => _confirmDelete(context, day),
-              borderRadius: BorderRadius.circular(10),
-              child: Container(
-                width: double.infinity,
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                decoration: BoxDecoration(
-                  color: dark ? AppTheme.darkSurface : AppTheme.lightSurface,
-                  borderRadius: BorderRadius.circular(10),
+        InkWell(
+          onTap: () => setState(() => _expanded = !_expanded),
+          borderRadius: BorderRadius.circular(8),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            child: Row(
+              children: [
+                Icon(Icons.edit_note, size: 16, color: textSecondary),
+                const SizedBox(width: 6),
+                Text(
+                  '这月记的想法(${days.length} 天)',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: textSecondary,
+                  ),
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Row(
-                      children: [
-                        Text(
-                          shortDateLabel(day),
-                          style: TextStyle(fontSize: 11.5, color: textSecondary),
-                        ),
-                        const Spacer(),
-                        // 显式的删除按钮:长按不是所有人都知道。
-                        InkWell(
-                          onTap: () => _confirmDelete(context, day),
-                          customBorder: const CircleBorder(),
-                          child: Padding(
-                            padding: const EdgeInsets.all(4),
-                            child: Icon(
-                              Icons.delete_outline,
-                              size: 17,
+                const Spacer(),
+                AnimatedRotation(
+                  turns: _expanded ? 0.5 : 0,
+                  duration: AppTheme.fast,
+                  child: Icon(
+                    Icons.keyboard_arrow_down,
+                    size: 18,
+                    color: textSecondary,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+        if (!_expanded)
+          const SizedBox.shrink()
+        else ...[
+          const SizedBox(height: 6),
+          for (final day in days)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 8),
+              child: InkWell(
+                onTap: () => widget.onTapDay(day),
+                // 长按删除。用户问"日历里记录的想法为什么没法删除?"——
+                // 之前确实一条路都没有,写错了只能去改文字、改不掉整条。
+                onLongPress: () => _confirmDelete(context, day),
+                borderRadius: BorderRadius.circular(10),
+                child: Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    color: dark ? AppTheme.darkSurface : AppTheme.lightSurface,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          Text(
+                            shortDateLabel(day),
+                            style: TextStyle(
+                              fontSize: 11.5,
                               color: textSecondary,
                             ),
                           ),
+                          const Spacer(),
+                          // 显式的删除按钮:长按不是所有人都知道。
+                          InkWell(
+                            onTap: () => _confirmDelete(context, day),
+                            customBorder: const CircleBorder(),
+                            child: Padding(
+                              padding: const EdgeInsets.all(4),
+                              child: Icon(
+                                Icons.delete_outline,
+                                size: 17,
+                                color: textSecondary,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 1),
+                      Text(
+                        journals[day]!,
+                        // 正文截几行了事:这里是一份"这个月都想了什么"的索引,
+                        // 要能一眼扫过;想看全文点进去。
+                        maxLines: 3,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13.5,
+                          height: 1.5,
+                          color: textPrimary,
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 1),
-                    Text(
-                      journals[day]!,
-                      // 正文截几行了事:这里是一份"这个月都想了什么"的索引,
-                      // 要能一眼扫过;想看全文点进去。
-                      maxLines: 3,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(fontSize: 13.5, height: 1.5, color: textPrimary),
-                    ),
-                  ],
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
+        ],
       ],
     );
   }
@@ -468,7 +527,7 @@ class _MonthJournalList extends StatelessWidget {
       ),
     );
     if (ok != true) return;
-    await onDeleteDay(day);
+    await widget.onDeleteDay(day);
   }
 }
 
