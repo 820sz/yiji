@@ -1930,36 +1930,59 @@ Widget _brokenBox(BuildContext context, {String ref = '', String why = ''}) {
     if (ref.isNotEmpty) '引用:${_clip(ref, 120)}',
     if (why.isNotEmpty) _clip(why, 120),
   ].join('\n');
-  return Container(
-    // 不给固定高度:诊断文字有几行算几行,给死高度就会溢出。
-    constraints: const BoxConstraints(minWidth: 120, maxWidth: 260),
-    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-    color: Colors.black12,
-    child: Column(
-      mainAxisSize: MainAxisSize.min,
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.broken_image_outlined, size: 20, color: textSecondary),
-            const SizedBox(width: 6),
+  return GestureDetector(
+    // 点一下就能把这串诊断信息复制走。
+    //
+    // 让用户"截图发我"其实很别扭:字小、要来回切应用。复制粘贴最省事——
+    // 而且这串引用正是定位这个 bug 唯一需要的东西。
+    onTap: detail.isEmpty
+        ? null
+        : () async {
+            await Clipboard.setData(ClipboardData(text: detail));
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已复制,发给开发者就能定位')),
+            );
+          },
+    child: Container(
+      // 不给固定高度:诊断文字有几行算几行,给死高度就会溢出。
+      constraints: const BoxConstraints(minWidth: 120, maxWidth: 260),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      color: Colors.black12,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.broken_image_outlined, size: 20, color: textSecondary),
+              const SizedBox(width: 6),
+              Text(
+                '图不在了',
+                style: TextStyle(fontSize: 11.5, color: textSecondary),
+              ),
+              if (detail.isNotEmpty) ...[
+                const SizedBox(width: 6),
+                Icon(Icons.copy, size: 12, color: textSecondary),
+              ],
+            ],
+          ),
+          if (detail.isNotEmpty) ...[
+            const SizedBox(height: 4),
+            // 用 Text 不用 SelectableText:诊断信息不该引入选区那套东西
+            // (它会跟着外层的选区一起注册,行为难以预期)。
             Text(
-              '图不在了',
-              style: TextStyle(fontSize: 11.5, color: textSecondary),
+              detail,
+              style: TextStyle(
+                fontSize: 10,
+                height: 1.35,
+                color: textSecondary,
+              ),
             ),
           ],
-        ),
-        if (detail.isNotEmpty) ...[
-          const SizedBox(height: 4),
-          // 用 Text 不用 SelectableText:诊断信息不该引入选区那套东西
-          // (它会跟着外层的选区一起注册,行为难以预期)。
-          Text(
-            detail,
-            style: TextStyle(fontSize: 10, height: 1.35, color: textSecondary),
-          ),
         ],
-      ],
+      ),
     ),
   );
 }
