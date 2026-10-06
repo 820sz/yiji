@@ -11,6 +11,7 @@ import 'package:yiji/data/chat_images.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
+import 'package:yiji/ui/chat_screen.dart';
 
 import 'support/fake_store.dart';
 
@@ -122,7 +123,7 @@ void main() {
     // 记下正文气泡的位置。
     final before = tester.getTopLeft(find.text('这周你码了 5k。'));
 
-    await tester.tap(find.text('思考过程'));
+    await tester.tap(find.textContaining(ReasoningPanel.doneLabel));
     await tester.pumpAndSettle();
     expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
 
@@ -140,10 +141,39 @@ void main() {
     );
 
     // 收起之后回到原位。
-    await tester.tap(find.text('思考过程'));
+    await tester.tap(find.textContaining(ReasoningPanel.doneLabel));
     await tester.pumpAndSettle();
     final restored = tester.getTopLeft(find.text('这周你码了 5k。'));
     expect(restored.dy, closeTo(before.dy, 1.0));
+  });
+
+  testWidgets('窄屏上思考过程那一栏不溢出', (tester) async {
+    // 参考样式那一行字会比较长(「已深度思考,用时 2 分 52 秒」),
+    // 加上左边的鲸鱼和右边的箭头,窄屏上很容易挤爆 Row。
+    // Flutter 会把 overflow 当成测试失败报出来,所以这条只要跑通就是在守线。
+    tester.view.physicalSize = const Size(1080, 1600);
+    tester.view.devicePixelRatio = 3;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ReasoningPanel(
+            text: '先看他这周的记录,再决定怎么回。',
+            dark: false,
+            elapsed: const Duration(minutes: 2, seconds: 52),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.textContaining(ReasoningPanel.doneLabel),
+      findsOneWidget,
+      reason: '标题应当在窄屏上也能显示出来(可以省略,但不能溢出)',
+    );
   });
 
   testWidgets('用户发的图会真的发给模型(多模态)', (tester) async {

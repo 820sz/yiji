@@ -20,6 +20,7 @@ import '../core/day.dart';
 import '../data/database.dart';
 import '../data/chat_attachment.dart';
 import '../data/chat_images.dart';
+import '../data/image_lines.dart';
 import '../data/meme_directive.dart';
 import '../data/data_range.dart';
 import '../data/goals.dart';
@@ -162,6 +163,24 @@ class AppState extends ChangeNotifier {
 
   /// 正在生成的这次回答属于哪个会话。落库时用它,而不是当前选中的会话。
   int _streamingConversationId = 0;
+
+  /// 这一轮思考是从什么时候开始的。
+  ///
+  /// 思考过程那一栏要显示"深度求索中,用时 X 分 Y 秒"。时间只在**这一次**回答里
+  /// 有用,落库时它被换算成时长(见 [_reasoningDurations]),不占数据库字段。
+  DateTime? _reasoningStartedAt;
+
+  /// 这一轮思考的开始时刻(没有在生成时为 null)。
+  DateTime? get reasoningStartedAt => _reasoningStartedAt;
+
+  /// 最近几次回答的思考时长,按消息 id 存。
+  ///
+  /// 内存里的东西,重启就没了——重启后那条历史只显示"已深度思考",不显示用时。
+  /// 为了一个"多久"去改数据库不值得;用户要的是那个样子,不是那一个数字。
+  final Map<int, Duration> _reasoningDurations = <int, Duration>{};
+
+  /// 某条消息的思考用时;没有记录时返回 null。
+  Duration? reasoningDurationOf(int messageId) => _reasoningDurations[messageId];
 
   bool get streaming => _streamingAnswer.isNotEmpty || _streamingReasoning.isNotEmpty;
 
@@ -1570,10 +1589,17 @@ class AppState extends ChangeNotifier {
 
     for (var i = 0; i < recent.length; i++) {
       final message = recent[i];
+      // 给模型看的是**投影**:图片行换成人话,不带 `![图]` 标记、不带内联字节。
+      // 直接给原文有两个坏处,见 [projectForModel]。
       history.add(
         message.isUser
-            ? AiMessage.user(message.content, images: historyImages[i] ?? const [])
-            : AiMessage.assistant(message.content),
+            ? AiMessage.user(
+                projectForModel(message.content, isUser: true),
+                images: historyImages[i] ?? const [],
+              )
+            : AiMessage.assistant(
+                projectForModel(message.content, isUser: false),
+              ),
       );
     }
 
@@ -1586,6 +1612,7 @@ class AppState extends ChangeNotifier {
 
     _streamingReasoning = '';
     _streamingAnswer = '';
+    _reasoningStartedAt = DateTime.now();
     notifyListeners();
 
     final config = thinking == null ? aiConfig : aiConfig.copyWith(thinking: thinking);
@@ -1641,6 +1668,8 @@ class AppState extends ChangeNotifier {
   Future<void> commitAssistantMessage() async {
     final raw = _streamingAnswer.trim();
     final reasoning = _streamingReasoning.trim();
+    final startedAt = _reasoningStartedAt;
+    _reasoningStartedAt = null;
     _streamingAnswer = '';
     _streamingReasoning = '';
     streamTick.value++;
@@ -1650,24 +1679,45 @@ class AppState extends ChangeNotifier {
     _streamingConversationId = 0;
 
     // 模型可能要求了一张表情包。挑图在这里做:挑到了就把它作为一行
-    // `![图] asset:...` 追加到正文后面,回看历史时能直接渲染出来。
+    // `![图] <自包含引用>` 追加到正文后面,回看历史时能直接渲染出来。
     final directive = stripMemeDirective(raw);
-    var answer = directive.text.trim();
-    if (directive.hasMeme) {
+    // **先归一化模型自己写出来的图片行。**
+    //
+    // 模型偶尔会照着提示词里那个格式,自己写一行 `![图] <它想要的东西>`。
+    // 那一行会被渲染层当成引用解析,而里面的东西不是任何一张图的路径,
+    // 于是显示成「图不在了」(用户报的正是这个)。归一化把能认出来的写成
+    // 自包含字节,认不出来的整行不留——落库的就一定是画得出来的。
+    var answer = await normalizeImageLines(
+      directive.text.trim(),
+      library: _memeLibrary,
+    );
+    if (directive.hasMeme && !hasImageLine(answer)) {
       final meme = await _pickMeme(directive);
-      // 用 messageRef,不是 assetPath。
-      //
-      // `assetPath` 对**用户自添加的图**会拼出一个安装包里不存在的路径
-      // (`asset:memes/user_xxx.png`),渲染必然失败成"图不在了"——
-      // 而 AI 恰恰会挑到用户自己加的图。messageRef 才知道两种来源各该怎么引用。
-      if (meme != null) answer = '$answer\n\n${memeLineFor(meme.messageRef)}';
+      if (meme != null) {
+        // **把字节直接写进消息,而不是写一条路径。**
+        //
+        // 写路径就有"路径对不对、文件在不在、库里的拼法和实际是否一致"这一串
+        // 失败点,而用户已经在这上面反复踩了很多轮(每次都是"图不在了")。
+        // 表情包只有几十 KB,base64 之后一条消息几万字符,完全承受得起;
+        // 换来的是**渲染不再依赖任何查找**——画不出来这件事从结构上消失。
+        final line = await _memeLineFor(meme, library: _memeLibrary);
+        if (line.isNotEmpty) answer = '$answer\n\n$line';
+      }
     }
 
     if (answer.isEmpty || target == 0) {
       notifyListeners();
       return;
     }
-    await _store.addMessage(target, 'assistant', answer, reasoning: reasoning);
+    final messageId = await _store.addMessage(
+      target,
+      'assistant',
+      answer,
+      reasoning: reasoning,
+    );
+    if (startedAt != null) {
+      _reasoningDurations[messageId] = DateTime.now().difference(startedAt);
+    }
     // 还没起名的会话用首条用户消息当标题——侧边栏里一堆"新对话"没法分辨。
     await _autoTitleConversation(target);
     await loadConversations();
@@ -1846,6 +1896,23 @@ class ReportDelta {
   final String reasoning;
 
   bool get isReasoning => reasoning.isNotEmpty;
+}
+
+/// 把挑中的表情包写成消息里的一行。
+///
+/// 有字节就写成**自包含的 data URL**——渲染不需要查任何路径,画不出来
+/// 这件事从结构上消失。字节确实拿不到时退回引用(内置图的 `asset:` 指向
+/// 安装包里的资源,那本身就是一个正确的引用)。
+///
+/// 描述跟在竖线后面:渲染用不到它,但它让**回看这轮对话时**还能说清
+/// 当时发的是哪张图,也是给模型看的历史投影里唯一保留的信息。
+Future<String> _memeLineFor(Meme meme, {MemeLibrary? library}) async {
+  final inline =
+      await inlineRefFor(meme.messageRef, library: library) ?? meme.messageRef;
+  final caption = meme.caption.trim();
+  return caption.isEmpty
+      ? '${ChatImage.marker} $inline'
+      : '${ChatImage.marker} $inline | $caption';
 }
 
 /// 一条等着挂到聊天输入框上方的心得分享。

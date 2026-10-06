@@ -697,6 +697,9 @@ class _ChatScreenState extends State<ChatScreen> {
                                 userName: state.identityLabel,
                                 dark: dark,
                                 isLast: index == messages.length - 1,
+                                reasoningDuration: state.reasoningDurationOf(
+                                  message.id,
+                                ),
                               ),
                             );
                           },
@@ -1022,6 +1025,7 @@ class _StreamingSlot extends StatelessWidget {
         provider: provider,
         avatar: state.currentConversationAvatar ?? state.avatarBytes,
         dark: dark,
+        startedAt: state.reasoningStartedAt,
       ),
     );
   }
@@ -1310,6 +1314,7 @@ class _MessageBlock extends StatelessWidget {
     required this.userName,
     required this.dark,
     this.isLast = false,
+    this.reasoningDuration,
   });
 
   final ChatMessage message;
@@ -1318,6 +1323,9 @@ class _MessageBlock extends StatelessWidget {
   final Uint8List? userAvatar;
   final String userName;
   final bool dark;
+
+  /// 这条消息的思考用时(只有本次会话里刚生成的那几条有)。
+  final Duration? reasoningDuration;
 
   /// 是不是最后一条。
   ///
@@ -1336,6 +1344,7 @@ class _MessageBlock extends StatelessWidget {
           ReasoningPanel(
             text: message.reasoning,
             dark: dark,
+            elapsed: reasoningDuration,
             // 落库之后一律收起。
             //
             // 以前这里传 isLast,让刚生成完的那条保持展开——那是因为当时
@@ -1367,6 +1376,7 @@ class _StreamingBlock extends StatelessWidget {
     required this.provider,
     required this.avatar,
     required this.dark,
+    this.startedAt,
   });
 
   final String reasoning;
@@ -1374,6 +1384,9 @@ class _StreamingBlock extends StatelessWidget {
   final AiProvider provider;
   final Uint8List? avatar;
   final bool dark;
+
+  /// 这一轮思考的开始时刻,用来显示"用时"。
+  final DateTime? startedAt;
 
   @override
   Widget build(BuildContext context) {
@@ -1384,6 +1397,7 @@ class _StreamingBlock extends StatelessWidget {
           ReasoningPanel(
             text: reasoning,
             dark: dark,
+            startedAt: startedAt,
             // 还在思考时展开:这一刻用户最想知道的就是它在想什么。
             live: answer.isEmpty,
           ),
@@ -1412,6 +1426,8 @@ class ReasoningPanel extends StatefulWidget {
     required this.dark,
     this.live = false,
     this.initiallyExpanded = false,
+    this.startedAt,
+    this.elapsed,
   });
 
   final String text;
@@ -1422,6 +1438,20 @@ class ReasoningPanel extends StatefulWidget {
 
   /// 刚生成完的那一条默认展开,避免生成结束时高度突变。其余默认收起。
   final bool initiallyExpanded;
+
+  /// 这一轮思考的开始时刻(仅 [live] 时有意义),用来显示"用时"。
+  ///
+  /// 不挂定时器:流式分片本来就在不停重建这一块,时间跟着分片走就够了。
+  /// 一个每秒唤醒的定时器会让 widget 测试里的 `pumpAndSettle` 永远不收敛。
+  final DateTime? startedAt;
+
+  /// 顶部那一行文案。测试按它定位,改文案不会让两边对不上。
+  static const thinkingLabel = '深度求索中';
+  static const doneLabel = '已深度思考';
+
+  /// 这一轮思考实际用了多久(历史消息)。没有记录时为 null,
+  /// 那一栏就只说"已深度思考",不编一个数字。
+  final Duration? elapsed;
 
   @override
   State<ReasoningPanel> createState() => _ReasoningPanelState();
@@ -1460,6 +1490,32 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
   /// 正在写的回答被挤到看不见的地方,用户还得等它想完再手动收起。
   static const _maxHeight = ChatMetrics.reasoningMaxHeight;
 
+  /// 顶部那一行字。
+  ///
+  /// 进行中是「深度求索中,用时 X」,完成后是「已深度思考,用时 X」。
+  /// **拿不到用时就不写用时**——历史消息(重启后内存里那份时长没了)
+  /// 只说状态,不编一个数字。
+  String _label() {
+    if (widget.live) {
+      final started = widget.startedAt;
+      if (started == null) return ReasoningPanel.thinkingLabel;
+      final used = DateTime.now().difference(started);
+      return used.inSeconds < 1
+          ? ReasoningPanel.thinkingLabel
+          : '${ReasoningPanel.thinkingLabel},用时 ${_formatUsed(used)}';
+    }
+    final used = widget.elapsed;
+    if (used == null || used.inSeconds < 1) return ReasoningPanel.doneLabel;
+    return '${ReasoningPanel.doneLabel},用时 ${_formatUsed(used)}';
+  }
+
+  /// 秒级以下的零头不显示:思考过程的用时精确到秒就够了。
+  static String _formatUsed(Duration used) {
+    final seconds = used.inSeconds;
+    if (seconds < 60) return '$seconds 秒';
+    return '${seconds ~/ 60} 分 ${seconds % 60} 秒';
+  }
+
   @override
   void didUpdateWidget(ReasoningPanel oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -1479,15 +1535,23 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final textSecondary = widget.dark
+    // 参考 DS 自己的样式:浅蓝底、品牌蓝字、左边一枚鲸鱼。
+    // 深色模式下不能照搬:浅蓝底放在近黑页面上是一块刺眼的白,
+    // 所以压成低明度蓝、字色提亮,色相不变。
+    final background = widget.dark
+        ? const Color(0xFF1C2540)
+        : const Color(0xFFEDF2FF);
+    final foreground = widget.dark
+        ? const Color(0xFF9DB4FF)
+        : const Color(0xFF4D6BFE);
+    final bodyText = widget.dark
         ? AppTheme.darkTextSecondary
         : AppTheme.lightTextSecondary;
-    final surface = widget.dark ? AppTheme.darkSurface : AppTheme.lightSurface;
 
     return Padding(
       padding: const EdgeInsets.only(left: 46, right: 36, bottom: 8),
       child: Material(
-        color: surface,
+        color: background,
         borderRadius: BorderRadius.circular(12),
         clipBehavior: Clip.antiAlias,
         child: InkWell(
@@ -1504,28 +1568,24 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
               children: [
                 Row(
                   children: [
-                    if (widget.live)
-                      const SizedBox(
-                        width: 12,
-                        height: 12,
-                        child: CircularProgressIndicator(strokeWidth: 1.8),
-                      )
-                    else
-                      Icon(
-                        Icons.psychology_outlined,
-                        size: 15,
-                        color: textSecondary,
-                      ),
+                    WhaleMark(size: 15, color: foreground),
                     const SizedBox(width: 7),
-                    Text(
-                      widget.live ? '思考中' : '思考过程',
-                      style: TextStyle(
-                        fontSize: 12.5,
-                        fontWeight: FontWeight.w500,
-                        color: textSecondary,
+                    // **必须能收缩**:窄屏上「深度求索中,用时 2 分 52 秒」这一行
+                    // 加上鲸鱼和箭头会超出面板宽度(Row 直接报 overflow)。
+                    // 用 Expanded 而不是 Spacer:让它自己吃掉多余或不足的宽度。
+                    Expanded(
+                      child: Text(
+                        _label(),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w500,
+                          color: foreground,
+                        ),
                       ),
                     ),
-                    const Spacer(),
+                    const SizedBox(width: 6),
                     AnimatedRotation(
                       turns: _expanded ? 0.5 : 0,
                       duration: AppTheme.fast,
@@ -1533,7 +1593,7 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                       child: Icon(
                         Icons.keyboard_arrow_down,
                         size: 18,
-                        color: textSecondary,
+                        color: foreground,
                       ),
                     ),
                   ],
@@ -1577,7 +1637,7 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                                       style: TextStyle(
                                         fontSize: 13,
                                         height: 1.6,
-                                        color: textSecondary,
+                                        color: bodyText,
                                       ),
                                     ),
                                   ),
@@ -1797,19 +1857,6 @@ class _MessageImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    // 内置引用渲染失败时**不是终点**:按文件名回查一次图库。
-    //
-    // 消息里可能出现各种历史遗留的引用(以前写过 `asset:memes/user_x.png`
-    // 这种安装包里根本不存在的路径)。只要图还在库里,就该把它画出来,
-    // 而不是给用户看一个"图不在了"——那等于把他的历史永久弄坏。
-    final source = image.isAsset
-        ? _AssetImage(
-            assetPath: image.assetPath,
-            fileName: image.fileName,
-            rawRef: image.ref,
-          )
-        : _DiskImage(fileName: image.fileName);
-
     // 尺寸按来源分档。
     //
     // 用户说过图"所占 ui 空间太大了…像 qq 那样":表情包在 QQ/微信里就是
@@ -1817,6 +1864,41 @@ class _MessageImage extends StatelessWidget {
     // 表情包(内置图库)本来就只要表达情绪,140 够看清;
     // 用户自己拍的照片要多留些细节,给到 200。
     final limit = image.isAsset ? 140.0 : 200.0;
+
+    // **解码尺寸按显示尺寸给,别按原图。**
+    //
+    // 表情包原图 1080 级、手机相册照片 4000 级,而这里只画 140~200 逻辑像素宽。
+    // 不限制的话每张图都要在 UI 线程上解出全尺寸位图(1080×1080 的 RGBA 是
+    // 4.4MB),正是"聊天记录里有图就掉帧"的另一半原因。
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final decodeWidth = (limit * dpr).round();
+
+    // 内置引用渲染失败时**不是终点**:按文件名回查一次图库。
+    //
+    // 消息里可能出现各种历史遗留的引用(以前写过 `asset:memes/user_x.png`
+    // 这种安装包里根本不存在的路径)。只要图还在库里,就该把它画出来,
+    // 而不是给用户看一个"图不在了"——那等于把他的历史永久弄坏。
+    final source = image.isInline
+        // 字节就在消息里:直接画,不查任何路径。
+        // 内置表情包用这条,所以"图不在了"从结构上不可能再出现。
+        ? Image.memory(
+            // 缓存过的同一份字节:引用不变时 provider 也不变,不会重复解码。
+            image.inlineBytes!,
+            fit: BoxFit.contain,
+            cacheWidth: decodeWidth,
+            // 重建时先留着上一帧的图,不要闪一下白。
+            gaplessPlayback: true,
+            errorBuilder: (context, error, stack) =>
+                _brokenBox(context, ref: '内联图片解码失败:$error'),
+          )
+        : image.isAsset
+        ? _AssetImage(
+            assetPath: image.assetPath,
+            fileName: image.fileName,
+            rawRef: image.ref,
+            decodeWidth: decodeWidth,
+          )
+        : _DiskImage(fileName: image.fileName, decodeWidth: decodeWidth);
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 2),
@@ -1846,6 +1928,7 @@ class _AssetImage extends StatefulWidget {
     required this.assetPath,
     required this.fileName,
     required this.rawRef,
+    required this.decodeWidth,
   });
 
   final String assetPath;
@@ -1854,6 +1937,9 @@ class _AssetImage extends StatefulWidget {
   /// 消息里原本那串引用。抢救失败时要显示出来——
   /// 不然只能看到一个「图不在了」,谁都判断不出是哪一串引用出的问题。
   final String rawRef;
+
+  /// 解码宽度(逻辑像素 × 屏幕密度)。只画 140 宽就别解 1080。
+  final int decodeWidth;
 
   @override
   State<_AssetImage> createState() => _AssetImageState();
@@ -1890,7 +1976,11 @@ class _AssetImageState extends State<_AssetImage> {
   Widget build(BuildContext context) {
     if (_failed) {
       if (_rescued != null) {
-        return Image.memory(_rescued!, fit: BoxFit.contain);
+        return Image.memory(
+          _rescued!,
+          fit: BoxFit.contain,
+          cacheWidth: widget.decodeWidth,
+        );
       }
       // 没救回来:把**引用和原因**一起显示出来。
       return _brokenBox(context, ref: widget.rawRef, why: _why);
@@ -1898,6 +1988,7 @@ class _AssetImageState extends State<_AssetImage> {
     return Image.asset(
       'assets/${widget.assetPath}',
       fit: BoxFit.contain,
+      cacheWidth: widget.decodeWidth,
       errorBuilder: (context, error, stack) {
         // 在 build 里不能直接 setState,排到下一帧。
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -1993,9 +2084,12 @@ Widget _brokenBox(BuildContext context, {String ref = '', String why = ''}) {
 /// 直接显示"图不在了"等于把用户的历史永久弄坏;而同一张图就在安装包里,
 /// 按文件名回查一次就能救回来。
 class _DiskImage extends StatefulWidget {
-  const _DiskImage({required this.fileName});
+  const _DiskImage({required this.fileName, required this.decodeWidth});
 
   final String fileName;
+
+  /// 解码宽度(逻辑像素 × 屏幕密度)。
+  final int decodeWidth;
 
   @override
   State<_DiskImage> createState() => _DiskImageState();
@@ -2072,6 +2166,7 @@ class _DiskImageState extends State<_DiskImage> {
       return Image.file(
         file,
         fit: BoxFit.contain,
+        cacheWidth: widget.decodeWidth,
         errorBuilder: (context, error, stack) => _brokenBox(
           context,
           ref: widget.fileName,
@@ -2081,7 +2176,11 @@ class _DiskImageState extends State<_DiskImage> {
     }
     final bytes = _fallback;
     if (bytes != null) {
-      return Image.memory(bytes, fit: BoxFit.contain);
+      return Image.memory(
+        bytes,
+        fit: BoxFit.contain,
+        cacheWidth: widget.decodeWidth,
+      );
     }
     return _brokenBox(
       context,

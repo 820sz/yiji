@@ -94,6 +94,41 @@ void main() {
     );
   });
 
+  testWidgets('内联(自包含)的图一定能画出来,不依赖任何查找', (tester) async {
+    // **这是"AI 发的图永远画得出来"的保证**:字节就在消息里,
+    // 没有路径可查错、没有文件可丢。
+    final sample = library.first;
+    final data = await rootBundle.load('assets/${sample.assetPath}');
+    final bytes = data.buffer.asUint8List();
+    final line =
+        '![图] data:image/webp;base64,${base64Encode(bytes)}';
+
+    final parsed = ChatImage.parse(line);
+    expect(parsed, isNotNull);
+    expect(parsed!.isInline, isTrue);
+    expect(parsed.inlineBytes, isNotNull);
+    expect(parsed.inlineBytes!.length, bytes.length);
+
+    // 而且真的画得出来(走气泡渲染)。
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatBubbleProbe(text: line, isUser: false),
+        ),
+      ),
+    );
+    for (var i = 0; i < 12; i++) {
+      await tester.pump(const Duration(milliseconds: 25));
+    }
+    expect(find.text('图不在了'), findsNothing);
+    expect(
+      find.byType(Image).evaluate().isNotEmpty ||
+          find.byType(RawImage).evaluate().isNotEmpty,
+      isTrue,
+      reason: '内联图片应当直接画出来',
+    );
+  });
+
   test('内置引用的 fileName 是纯文件名,不是带前缀的整串', () {
     // 用户截图里的诊断写着:
     //   按文件名「asset:memes/daily/1786535328169.webp」在磁盘和内制图库里都没找到

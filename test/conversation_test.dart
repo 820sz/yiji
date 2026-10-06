@@ -56,6 +56,10 @@ void main() {
       ),
     ]);
     state.setMemeLibraryForTest(catalog);
+    // 静态那份也要塞进去:解析引用、落库前的归一化都会走它。
+    // 不塞的话,测试里去找真实 assets 的那一步会一直不返回(widget 测试的
+    // 假时钟下等不到超时),表现成"回答永远不出来"——那是测试环境的性质。
+    MemeLibrary.primeForTest(catalog);
   }
 
   setUp(() {
@@ -86,6 +90,10 @@ void main() {
       );
       await openTab(tester, '聊天');
       await send(tester, '今天任务全做完了');
+      // 挑图 + 读字节是异步的:落库那一刻才算数,给它几帧。
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 25));
+      }
 
       // 指令行不能被用户看到。
       expect(find.textContaining('[表情'), findsNothing);
@@ -94,11 +102,15 @@ void main() {
       expect(find.textContaining('那我也替你高兴'), findsOneWidget);
 
       // 落库的消息里要带上挑出来的那张图。
+      //
+      // 生产环境写的是**自包含的 data URL**(字节直接在消息里),不依赖任何查找;
+      // 拿不到字节时才退回引用。测试里的图库是注入的假库,拿不到字节,
+      // 所以这里只断言"这一行在"——引用形式由 meme_bubble_render_test 专门盯着。
       final message = state.chat.where((m) => !m.isUser).last;
       expect(
         message.content,
-        contains('![图] asset:memes/'),
-        reason: '应该挑一张内置表情包并写进消息,实际内容:${message.content}',
+        contains('![图]'),
+        reason: '应该挑一张表情包并写进消息',
       );
     });
 
@@ -109,6 +121,51 @@ void main() {
 
       final message = state.chat.where((m) => !m.isUser).last;
       expect(message.content.contains('![图]'), isFalse);
+    });
+
+    testWidgets('模型自己写的那行 ![图] 不会留在消息里(用户截图那个 bug)', (tester) async {
+      // 用户截图里的占位框写着「引用:瘫成一团趴在鲸鱼抱枕上,眼都睁不开」——
+      // 那不是路径,是一句描述:模型照着提示词里那个格式,自己写了一行
+      // `![图] <清单里的描述>`。渲染层只认引用,于是显示「图不在了」。
+      // 落库前要把这种行处理掉:认得出来就变成自包含字节,认不出来整行不留。
+      await pumpApp(
+        tester,
+        reply: '今天又瘫了。\n\n![图] 摸着圆滚滚肚子，笑眯眯喊吃饱饱',
+      );
+      await openTab(tester, '聊天');
+      await send(tester, '好累');
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 25));
+      }
+
+      final message = state.chat.where((m) => !m.isUser).last;
+      expect(message.content, contains('今天又瘫了。'), reason: '正文一个字都不能丢');
+      expect(
+        message.content,
+        isNot(contains('![图] 摸着圆滚滚肚子')),
+        reason: '这一行渲染出来就是用户截图里的「图不在了」',
+      );
+    });
+
+    testWidgets('历史再发给模型时,图片行换成一句人话', (tester) async {
+      // 两个理由:内联字节一张图几十 KB 会挤爆上下文;而 `![图]` 这个格式
+      // 出现在模型的上下文里,它会照着模仿——那正是上面那个 bug 的来源。
+      await pumpApp(
+        tester,
+        reply: '好耶,那我也替你高兴。\n[表情: 摸着圆滚滚肚子，笑眯眯喊吃饱饱]',
+      );
+      await openTab(tester, '聊天');
+      await send(tester, '今天任务全做完了');
+      for (var i = 0; i < 20; i++) {
+        await tester.pump(const Duration(milliseconds: 25));
+      }
+      // 再发一句:这一轮的历史里就带着上一条 AI 消息(它含一张图)。
+      await send(tester, '嗯嗯');
+
+      final sent = ai.lastSentText();
+      expect(sent.contains('![图]'), isFalse, reason: '模型照这个格式模仿就是那个 bug');
+      expect(sent.contains('data:image'), isFalse, reason: '几十 KB 的 base64 不该进上下文');
+      expect(sent, contains('[我发的图'));
     });
 
     testWidgets('发图规则只在有图库时才发给模型', (tester) async {

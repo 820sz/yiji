@@ -191,15 +191,39 @@ class _ProviderMark extends StatelessWidget {
   }
 }
 
+/// DeepSeek 的鲸鱼标志,单色描边,不带底座。
+///
+/// 用在思考过程那一栏上:DS 自己的样式就是浅蓝底 + 一枚品牌色鲸鱼 + 一行蓝字。
+class WhaleMark extends StatelessWidget {
+  const WhaleMark({
+    super.key,
+    this.size = 14,
+    this.color = const Color(0xFF4D6BFE),
+  });
+
+  final double size;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) => CustomPaint(
+        size: Size.square(size),
+        painter: _DeepSeekWhalePainter(color: color),
+      );
+}
+
 /// DeepSeek 的鲸鱼标志。
 ///
 /// 按品牌图形的手绘近似:一条上扬的鲸背 + 尾部的水花,用两段三次贝塞尔画成,
 /// 所以不需要外挂图片资源,缩到任何尺寸都清晰。
 class _DeepSeekWhalePainter extends CustomPainter {
+  const _DeepSeekWhalePainter({this.color = Colors.white});
+
+  final Color color;
+
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = Colors.white
+      ..color = color
       ..style = PaintingStyle.stroke
       ..strokeWidth = size.width * 0.075
       ..strokeCap = StrokeCap.round
@@ -221,11 +245,12 @@ class _DeepSeekWhalePainter extends CustomPainter {
     canvas.drawPath(tail, paint);
 
     // 水花:左下两滴,点出"跃出水面"的意思。
-    final splash = Paint()..color = Colors.white;
+    final splash = Paint()..color = color;
     canvas.drawCircle(Offset(w * 0.20, h * 0.66), w * 0.055, splash);
     canvas.drawCircle(Offset(w * 0.32, h * 0.78), w * 0.035, splash);
   }
 
   @override
-  bool shouldRepaint(covariant _DeepSeekWhalePainter oldDelegate) => false;
+  bool shouldRepaint(covariant _DeepSeekWhalePainter oldDelegate) =>
+      oldDelegate.color != color;
 }

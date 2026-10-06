@@ -32,7 +32,10 @@ void main() {
     SharedPreferences.setMockInitialValues({'ai_api_key': 'sk-test'});
     // 图片要落盘,给一个真目录(测试环境没有 path_provider 通道)。
     tempDir = Directory.systemTemp.createTempSync('yiji_meme_test');
-    ChatImages.directoryOverride = tempDir;
+    // pin 而不是 override:pin 会把目录**固定下来**,让同步查询立刻可用。
+    // 只 override 的话异步目录查询在 widget 测试里不返回,
+    // 「把历史里的图读出来发给模型」这条链就断了。
+    ChatImages.pinDirectoryForTest(tempDir);
   });
 
   tearDown(() {

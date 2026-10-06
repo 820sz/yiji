@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -17,10 +18,51 @@ import 'package:path_provider/path_provider.dart';
 class ChatImage {
   const ChatImage({required this.ref});
 
-  /// `asset:<包内路径>` 或本地文件名(相对 [ChatImages.dir] )。
+  /// `asset:<包内路径>`、`data:image/...;base64,<字节>`,或本地文件名。
   final String ref;
 
   bool get isAsset => ref.startsWith('asset:');
+
+  /// 图片字节直接写在消息里(自包含)。
+  ///
+  /// **这是"AI 发的图永远画得出来"的最后一道保险**:引用就是字节本身,
+  /// 不需要去任何地方查文件,也就不存在"找不到"。
+  /// 内置表情包普遍 30KB 上下,base64 之后约 46KB,一条消息完全承受得起。
+  bool get isInline => ref.startsWith('data:image/');
+
+  /// 内联字节(仅 [isInline] 时有意义)。
+  Uint8List? get inlineBytes {
+    if (!isInline) return null;
+    final cached = _decoded[ref];
+    if (cached != null) return cached;
+    final comma = ref.indexOf(',');
+    if (comma < 0) return null;
+    final Uint8List bytes;
+    try {
+      bytes = base64Decode(ref.substring(comma + 1));
+    } catch (_) {
+      return null;
+    }
+    if (_decoded.length >= decodedLimit) _decoded.remove(_decoded.keys.first);
+    return _decoded[ref] = bytes;
+  }
+
+  /// 内联字节的解码缓存。
+  ///
+  /// **按引用串缓存,不是省 CPU 那么简单**:`Image.memory` 认图的键是字节对象的
+  /// 身份,而每次 base64 解码都会造出一个新的 `Uint8List`。不缓存的话,气泡每重建
+  /// 一次就等于换了一张新图——旧的缓存命中不了、要重新解码、重新走一遍加载态。
+  /// 用户报的「聊天记录里有表情包时一划就卡帧闪烁」就是这条路径每帧解码一张图。
+  static final Map<String, Uint8List> _decoded = <String, Uint8List>{};
+
+  /// 缓存条数上限。一条消息一张图,60 张够覆盖几屏来回。
+  static const decodedLimit = 60;
+
+  /// 测试用:清掉解码缓存,免得住例之间互相影响。
+  static void clearDecodedCache() => _decoded.clear();
+
+  /// 测试用:当前缓存了多少条。
+  static int get decodedCacheLength => _decoded.length;
 
   /// 包内路径(仅 [isAsset] 时有意义)。
   String get assetPath => ref.substring('asset:'.length);
@@ -31,8 +73,11 @@ class ChatImage {
   /// 文件时得到的是 `asset:memes/daily/x.webp` 这种"文件名",必然找不到。
   /// 用户报的"图不在了"里,那串诊断就写着这件事——
   /// `按文件名「asset:memes/daily/x.webp」…都没找到`。
-  String get fileName =>
-      isAsset ? assetPath.split('/').last : ref.split(RegExp(r'[/\\]')).last;
+  String get fileName => isInline
+      ? ''
+      : (isAsset
+            ? assetPath.split('/').last
+            : ref.split(RegExp(r'[/\\]')).last);
 
   /// 解析用:不是标记行返回 null。
   static ChatImage? parse(String line) {
@@ -42,10 +87,60 @@ class ChatImage {
     if (body.isEmpty) return null;
     // 竖线之后是说明,渲染时用不到,但它必须被容忍(不能当成引用的一部分)。
     final bar = body.indexOf('|');
-    final ref = (bar < 0 ? body : body.substring(0, bar)).trim();
+    var ref = (bar < 0 ? body : body.substring(0, bar)).trim();
     // 路径里出现省略号说明是**模型自己打出来的**,不是真实路径。
     if (ref.isEmpty || ref.contains('...') || ref.contains('…')) return null;
+    ref = _resolveCaptionRef(ref);
     return ChatImage(ref: ref);
+  }
+
+  /// 引用不像路径、却和某张图的描述对得上时,把它换回那张图的真实引用。
+  ///
+  /// 这是用户截图里那个 bug 的正面修法:模型偶尔会照着提示词里那个格式,
+  /// 自己写一行 `![图] <清单里的描述>`。那一行里没有路径,渲染层只认引用,
+  /// 于是显示成「图不在了」。**描述本身足够定位那张图**,所以在解析这一步
+  /// 就认回去——渲染、给模型看的历史、落库前的归一化,全都跟着变对。
+  ///
+  /// 结果做缓存:`parse` 在渲染路径上每帧都会跑,而回查要遍历上百条描述。
+  static String _resolveCaptionRef(String ref) {
+    if (isInlineRef(ref) || _looksLikePath(ref)) return ref;
+    final cached = _resolvedRefs[ref];
+    if (cached != null) return cached.isEmpty ? ref : cached;
+    final meme = MemeLibrary.cached?.matchByCaption(ref);
+    _resolvedRefs[ref] = meme?.messageRef ?? '';
+    return meme?.messageRef ?? ref;
+  }
+
+  /// 这串东西看起来像文件/路径吗。
+  ///
+  /// 像的话就按引用原样走(文件名、`asset:` 路径),不要拿它去匹配描述——
+  /// 那既没意义,也会让"磁盘上有这个文件"的图被换成另一张。
+  static bool _looksLikePath(String ref) {
+    if (ref.contains('/') || ref.contains(r'\')) return true;
+    return RegExp(
+      r'\.(png|jpe?g|webp|gif|bmp|img)$',
+      caseSensitive: false,
+    ).hasMatch(ref);
+  }
+
+  /// `data:image/...` 开头。
+  static bool isInlineRef(String ref) => ref.startsWith('data:image/');
+
+  /// 描述回查的缓存:引用 → 认出来的真实引用(空串表示"查过,认不出来")。
+  static final Map<String, String> _resolvedRefs = <String, String>{};
+
+  /// 图库换了内容(用户加/删表情包)时清掉回查缓存。
+  static void clearResolvedRefs() => _resolvedRefs.clear();
+
+  /// 图片行里 `|` 之后那句说明(没有就返回空串)。
+  ///
+  /// 用户发图时会把表情包的描述挂在后面,模型靠它知道那张图是什么意思;
+  /// 而**一句描述本身也应当能反过来定位到那张图**——见
+  /// [MemeLibrary.matchByCaption]。
+  static String captionOf(String line) {
+    final body = stripDecoration(line);
+    final bar = body.indexOf('|');
+    return bar < 0 ? '' : body.substring(bar + 1).trim();
   }
 
   /// 去掉模型可能加上的装饰:反引号、列表符号、引用符号、加粗星号。
@@ -182,12 +277,21 @@ class MemeLibrary {
 
   static MemeLibrary? _cached;
 
+  /// 已经在内存里的那份图库(还没加载完时为 null)。
+  ///
+  /// 给**同步**的场合用:解析引用、渲染气泡这些地方不能 await 一次加载,
+  /// 但顺手做一次内存查找是可以的(见 [ChatImage.parse])。
+  static MemeLibrary? get cached => _cached;
+
   /// 直接给定图库(测试用)。
   ///
   /// widget 测试里 `rootBundle.loadString` 会**永远不返回**(不打日志也不报错),
   /// 所以不能靠等真实读取来准备图库——等它只会把用例挂死或者拿到空库。
   /// 测试把已经解析好的那份塞进来。
-  static void primeForTest(MemeLibrary library) => _cached = library;
+  static void primeForTest(MemeLibrary library) {
+    _cached = library;
+    ChatImage.clearResolvedRefs();
+  }
 
   /// 读图库:**内置 + 用户自添加合并**。
   ///
@@ -216,7 +320,11 @@ class MemeLibrary {
   }
 
   /// 丢掉缓存。用户添加/删除表情包之后要调一次,否则新图进不了清单。
-  static void invalidate() => _cached = null;
+  static void invalidate() {
+    _cached = null;
+    // 描述回查的结果也要一起作废:图库内容变了,同一句描述可能指向别的图。
+    ChatImage.clearResolvedRefs();
+  }
 
   bool get isEmpty => memes.isEmpty;
 
@@ -295,9 +403,23 @@ class MemeLibrary {
   /// 匹配顺序:整条描述精确相等 → 描述互相包含 → 关键词打分。
   Meme? pickByCaption(String caption, {String? tag, int seed = 0}) {
     if (memes.isEmpty) return null;
+    final exact = matchByCaption(caption, tag: tag);
+    if (exact != null) return exact;
+    // 都没对上就按关键词打分,最后还是不行才随机——宁可给一张同情绪的,
+    // 也不要什么都不发(用户已经看到 AI 说"这个给你")。
+    return pick(tag: tag, query: caption, seed: seed);
+  }
+
+  /// 只认**真的对得上**的描述,对不上就返回 null。
+  ///
+  /// 和 [pickByCaption] 的区别是**没有兜底**:它不做关键词打分、不随机抽。
+  /// 用在"拿一句话去反查具体是哪张图"的场合(比如模型把清单里的描述当引用
+  /// 写了出来)。那种场合随便给一张图是错的——用户会看到一张跟上下文无关的图,
+  /// 比画不出来更奇怪。
+  Meme? matchByCaption(String caption, {String? tag}) {
+    if (memes.isEmpty) return null;
     final wanted = _normalize(caption);
     if (wanted.isEmpty) return null;
-
     final pool = tag == null || tag.isEmpty ? memes : byTag(tag);
     final searchIn = pool.isEmpty ? memes : pool;
 
@@ -307,12 +429,37 @@ class MemeLibrary {
     for (final meme in searchIn) {
       final shown = _normalize(meme.caption);
       if (shown.isEmpty) continue;
-      if (shown.contains(wanted) || wanted.contains(shown)) return meme;
+      // 两个方向都要求"短的那一串"够长:一句话里恰好含着一个很短的 caption
+      // 是常事(关键词级别的词),那种巧合不该定到某一张图上去。
+      if (wanted.length >= 5 && shown.contains(wanted)) return meme;
+      if (shown.length >= 4 && wanted.contains(shown)) return meme;
     }
-    // 都没对上就按关键词打分,最后还是不行才随机——宁可给一张同情绪的,
-    // 也不要什么都不发(用户已经看到 AI 说"这个给你")。
-    final picked = pick(tag: tag, query: caption, seed: seed);
-    return picked;
+    return null;
+  }
+
+  /// 按**消息里可能出现的那串引用**找图。
+  ///
+  /// 一条消息里的引用有五种来历,这里全都认:
+  /// - `data:image/...`:字节就在里面(不在这里处理,调用方自己有分支);
+  /// - `asset:memes/<file>`:内置图;
+  /// - `<file>` / `<id>`:自添加的图库文件名,或内置图的短 id;
+  /// - **一句描述**:模型偶尔会把清单里的描述当成引用写进正文,
+  ///   按描述反查就能把它救回成一张真实的图(而不是显示「图不在了」)。
+  Meme? findByRef(String ref) {
+    final text = ref.trim();
+    if (text.isEmpty) return null;
+    for (final meme in memes) {
+      if (meme.messageRef == text ||
+          meme.assetPath == text ||
+          meme.file == text) {
+        return meme;
+      }
+    }
+    final name = text.split(RegExp(r'[/\\]')).last;
+    for (final meme in memes) {
+      if (p.basename(meme.file) == name || meme.id == text) return meme;
+    }
+    return matchByCaption(text);
   }
 
   /// 比较用:去掉空白与标点、统一大小写。模型抄回来时可能少个逗号或加个句号。
@@ -527,13 +674,13 @@ class ChatImages {
   /// 少一次事件循环往返,渲染时能更快出图,也**不会在测试里留下 pending timer**
   /// (`Future.timeout` 会挂一个定时器,测试结束前没回收就直接报错)。
   static File? fileSync(String name) {
-    final cached = _dir;
-    final override = _override;
-    final base = cached ?? override;
+    final base = _dir ?? _override;
     if (base == null) return null;
     // 走的是和 dir() 同一套布局:`<根>/chat_images/<名>`,不是把根当目录。
     // 这里曾经把 override 直接当目录用,于是测试里文件写在一处、渲染找另一处。
-    final target = File(p.join(base.path, 'chat_images', name));
+    final root = _dir == null ? Directory('${_override!.path}/chat_images') : _dir!;
+    if (!root.existsSync()) return null;
+    final target = File('${root.path}/$name');
     return target.existsSync() ? target : null;
   }
 
@@ -544,7 +691,11 @@ class ChatImages {
   /// 那是测试环境的性质,不是产品缺陷。给它一个确定的目录,测试才谈得上"验渲染"。
   static void pinDirectoryForTest(Directory dir) {
     _override = dir;
-    _dir = Directory(p.join(dir.path, 'chat_images'));
+    final images = Directory(p.join(dir.path, 'chat_images'));
+    // **必须真的建出来**:`dir()` 命中缓存就返回,不会再创建,
+    // 于是写文件会静默失败(踩过:测试里 save 一直返回 null)。
+    if (!images.existsSync()) images.createSync(recursive: true);
+    _dir = images;
     _avatarDir = null;
     _userMemeDir = null;
   }
@@ -580,17 +731,40 @@ class ChatImages {
   /// 3. 安装包内的内置图——按文件名回查索引。
   static Future<Uint8List?> bytesOf(ChatImage image) async {
     try {
+      // 自包含:字节就在引用里,不必查任何东西。
+      final inline = image.inlineBytes;
+      if (inline != null && inline.isNotEmpty) return inline;
       if (image.isAsset) {
         final data = await rootBundle.load('assets/${image.assetPath}');
         return data.buffer.asUint8List();
       }
-      final onDisk = await file(image.fileName);
-      final bytes = await onDisk?.readAsBytes();
-      if (bytes != null && bytes.isNotEmpty) return bytes;
+      // **先用同步查询拿到确切结论。**
+      //
+      // 这条路径在"回答落库"和"把历史图发给模型"两条关键链上:一旦挂住,
+      // 用户看到的是回答永远出不来。目录已知时同步查一次就有答案;
+      // 目录还不知道时只让异步去把它准备好,不在这里等。
+      final sync = fileSync(image.fileName);
+      if (sync != null) {
+        final bytes = await sync.readAsBytes();
+        if (bytes.isNotEmpty) return bytes;
+      } else {
+        unawaited(_warmDirectory());
+      }
+      // 磁盘上没有:**用户表情包目录**和**图库**都还要查一次。
+      // 只查聊天图片目录的话,用户自己加的图永远找不回来。
       return await _userMemeBytes(image.fileName) ??
-          await _builtinFallback(image.fileName);
+          await _libraryFallback(image.ref);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 把聊天图片目录准备好(不阻塞调用方)。
+  static Future<void> _warmDirectory() async {
+    try {
+      await dir();
+    } catch (_) {
+      // 目录建不出来只是少一条查询路径,不影响别处。
     }
   }
 
@@ -607,30 +781,29 @@ class ChatImages {
     }
   }
 
-  /// 按文件名在图库里找同名的那张内置图。
-  static Future<Uint8List?> _builtinFallback(String fileName) async {
+  /// 按**消息里那串引用**回查图库:文件名、短 id、一句描述都认。
+  ///
+  /// 这是「图不在了」的最后一道救援:图其实好好在图库里,只是消息里那串字
+  /// 不完全是它的路径(模型自己把描述写成了引用,历史版本写错过前缀……)。
+  /// 认得出是哪张图,就能把它画出来,而不是给用户看一个破图占位。
+  static Future<Uint8List?> _libraryFallback(String ref) async {
     try {
       // 图库本身可能卡住(资源读取),不能让它拖住渲染。
       final library = await MemeLibrary.load().timeout(
         const Duration(seconds: 3),
       );
-      for (final meme in library.memes) {
-        if (meme.fromUser) continue;
-        if (meme.file == fileName || meme.file.endsWith('/$fileName')) {
-          final data = await rootBundle
-              .load('assets/${meme.assetPath}')
-              .timeout(const Duration(seconds: 3));
-          return data.buffer.asUint8List();
-        }
-      }
+      final meme = library.findByRef(ref);
+      if (meme == null) return null;
+      // 内置的走 asset,自添加的走用户目录,[memeBytes] 两种都认识。
+      return await memeBytes(meme).timeout(const Duration(seconds: 3));
     } catch (_) {
       // 图库读不出来只是少一条退路,不影响别处。
     }
     return null;
   }
 
-  static String _mimeOf(ChatImage image) {
-    final name = image.isAsset ? image.assetPath : image.fileName;
+  /// 从文件名推 MIME 类型。
+  static String mimeForName(String name) {
     final ext = p.extension(name).toLowerCase();
     return switch (ext) {
       '.jpg' || '.jpeg' => 'jpeg',
@@ -640,6 +813,9 @@ class ChatImages {
       _ => 'png',
     };
   }
+
+  static String _mimeOf(ChatImage image) =>
+      mimeForName(image.isAsset ? image.assetPath : image.fileName);
 
   /// 头像目录。和聊天图片分开放,便于整目录清理。
   static Future<Directory> avatarDir() async {

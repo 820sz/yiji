@@ -10,6 +10,7 @@ import 'package:yiji/ai/settings_store.dart';
 import 'package:yiji/data/report_service.dart';
 import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
+import 'package:yiji/ui/chat_screen.dart';
 
 import 'support/fake_store.dart';
 
@@ -53,8 +54,8 @@ void main() {
       findsWidgets,
       reason: '流式正文应当显示在气泡里,而不是等落库才出现',
     );
-    // 思考过程也要在(它是单独一块)。
-    expect(find.text('思考过程'), findsOneWidget);
+    // 思考过程也要在(它是单独一块)。文案按参考样式改成了「已深度思考」。
+    expect(find.textContaining(ReasoningPanel.doneLabel), findsOneWidget);
     // 完成后是正式消息,不再是"正在生成"。
     expect(state.streaming, isFalse);
     expect(state.chat.last.content, contains('从前有座山'));

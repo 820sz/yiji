@@ -17,6 +17,7 @@ import 'package:yiji/main.dart';
 import 'package:yiji/state/app_state.dart';
 import 'package:yiji/ui/ai_avatar.dart';
 import 'package:yiji/ui/calendar_screen.dart';
+import 'package:yiji/ui/chat_screen.dart';
 import 'package:yiji/ui/image_cropper.dart';
 import 'package:yiji/ui/task_card.dart';
 import 'package:yiji/ui/theme.dart';
@@ -667,7 +668,9 @@ void main() {
       // 生成完之后思考过程**自动收起**,只留一行标题。
       // 用户的原话是"用户还得等 ai 思考完手动收起思考过程"——
       // 现在不用他动手了,想看再点开。
-      expect(find.text('思考过程'), findsOneWidget);
+      // 标题文案按用户给的参考样式改成了「已深度思考」(可能带",用时 X 秒")。
+      final title = find.textContaining(ReasoningPanel.doneLabel);
+      expect(title, findsOneWidget);
       expect(
         find.text('先看他这周的记录,再决定怎么回。'),
         findsNothing,
@@ -675,11 +678,11 @@ void main() {
       );
 
       // 点开能看全文。
-      await tester.tap(find.text('思考过程'));
+      await tester.tap(title);
       await tester.pumpAndSettle();
       expect(find.text('先看他这周的记录,再决定怎么回。'), findsOneWidget);
       // 想看干净的正文就自己点一下收起。
-      await tester.tap(find.text('思考过程'));
+      await tester.tap(find.textContaining(ReasoningPanel.doneLabel));
       await tester.pumpAndSettle();
       expect(find.text('先看他这周的记录,再决定怎么回。'), findsNothing);
     });
