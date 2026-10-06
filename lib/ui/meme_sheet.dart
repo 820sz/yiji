@@ -1,8 +1,12 @@
+import 'dart:async';
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../data/chat_attachment.dart';
 import '../data/chat_images.dart';
+import '../state/app_state.dart';
 import 'image_cropper.dart';
 import 'theme.dart';
 
@@ -96,6 +100,11 @@ class _MemeSheetState extends State<_MemeSheet> {
         _library = refreshed;
         _tag = 'mine';
       });
+      // **还要刷新 AI 那一份。**
+      //
+      // 提示词里的候选清单是启动时准备好的另一份拷贝;不刷新的话,新加的图
+      // 这一整个会话都进不了模型的清单——用户会以为"我加了,AI 还是调不出来"。
+      await AppScope.of(context).refreshMemeCatalog();
       messenger.showSnackBar(
         const SnackBar(content: Text('加好了,AI 现在也能挑到它')),
       );
@@ -290,17 +299,22 @@ class _MemeSheetState extends State<_MemeSheet> {
                     borderRadius: BorderRadius.circular(10),
                     child: Container(
                       color: dark ? AppTheme.darkBackground : AppTheme.lightBackground,
-                      child: Image.asset(
-                        'assets/${meme.assetPath}',
-                        fit: BoxFit.contain,
-                        // 描述作为语义标签:读屏用户听得到这是哪张图。
-                        semanticLabel: meme.caption,
-                        errorBuilder: (context, error, stack) => Icon(
-                          Icons.broken_image_outlined,
-                          size: 20,
-                          color: textSecondary,
-                        ),
-                      ),
+                      // **用户自己加的那批不在安装包里**,`Image.asset` 只会画出
+                      // 一张破图(用户报的"自己加的图在库里显示不出来")。
+                      // 它们得从私有目录读字节来画。
+                      child: meme.fromUser
+                          ? _UserMemeThumb(meme: meme, caption: meme.caption)
+                          : Image.asset(
+                              'assets/${meme.assetPath}',
+                              fit: BoxFit.contain,
+                              // 描述作为语义标签:读屏用户听得到这是哪张图。
+                              semanticLabel: meme.caption,
+                              errorBuilder: (context, error, stack) => Icon(
+                                Icons.broken_image_outlined,
+                                size: 20,
+                                color: textSecondary,
+                              ),
+                            ),
                     ),
                   ),
                 );
@@ -309,6 +323,71 @@ class _MemeSheetState extends State<_MemeSheet> {
           ),
         ],
       ),
+    );
+  }
+}
+
+/// 用户自己加的那张图:从私有目录读字节来画。
+///
+/// `Image.asset` 画不了它——那张图不在安装包里,只有文件名是对的,
+/// 画出来就是一张破图(用户报的"我加的图在表情包库里显示不出来")。
+/// 字节读一次就缓存住([ChatImages.cachedMemeBytes]):滚动重建时既不重复读盘,
+/// 也不会让 `Image.memory` 认成另一张图重新解码。
+class _UserMemeThumb extends StatefulWidget {
+  const _UserMemeThumb({required this.meme, required this.caption});
+
+  final Meme meme;
+  final String caption;
+
+  @override
+  State<_UserMemeThumb> createState() => _UserMemeThumbState();
+}
+
+class _UserMemeThumbState extends State<_UserMemeThumb> {
+  Uint8List? _bytes;
+  var _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    unawaited(_load());
+  }
+
+  Future<void> _load() async {
+    final bytes = await ChatImages.cachedMemeBytes(widget.meme);
+    if (!mounted) return;
+    setState(() {
+      _bytes = bytes;
+      _done = true;
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final bytes = _bytes;
+    if (bytes == null) {
+      // 还在读,或者真读不出来(文件被系统清理过):给个不刺眼的占位。
+      if (!_done) {
+        return const Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2),
+          ),
+        );
+      }
+      return const Center(
+        child: Icon(
+          Icons.image_not_supported_outlined,
+          size: 20,
+          color: Color(0xFF9EA3AC),
+        ),
+      );
+    }
+    return Image.memory(
+      bytes,
+      fit: BoxFit.contain,
+      semanticLabel: widget.caption,
     );
   }
 }

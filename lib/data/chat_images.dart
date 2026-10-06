@@ -324,6 +324,7 @@ class MemeLibrary {
     _cached = null;
     // 描述回查的结果也要一起作废:图库内容变了,同一句描述可能指向别的图。
     ChatImage.clearResolvedRefs();
+    ChatImages.clearMemeBytesCache();
   }
 
   bool get isEmpty => memes.isEmpty;
@@ -478,7 +479,17 @@ class MemeLibrary {
     if (memes.isEmpty) return '';
     final buffer = StringBuffer();
     for (final tag in tags) {
-      final shown = byTag(tag).take(perTag).toList();
+      final all = byTag(tag);
+      // **用户自己加的一张都不截。**
+      //
+      // 他加图的全部目的就是让 AI 能用上它;按 perTag 截掉的话,加到第七张
+      // 之后前面几张就"消失"了——用户会认为"我加了 AI 却调不出来"。
+      // 那批通常只有几张,全列出来不占多少 token。内置那批仍然按 perTag 截。
+      final shown = <Meme>[
+        ...all.where((meme) => meme.fromUser),
+        ...all.where((meme) => !meme.fromUser).take(perTag),
+      ];
+      if (shown.isEmpty) continue;
       buffer.writeln('【$tag】');
       for (final meme in shown) {
         buffer.writeln('  ${meme.caption}');
@@ -651,6 +662,24 @@ class ChatImages {
       return null;
     }
   }
+
+  /// 用户表情包的字节,**带缓存**。
+  ///
+  /// 挑图面板是个网格,滚一下就会重建;每次都去读一遍文件既慢,又会让
+  /// `Image.memory` 认成"另一张新图"重新解码。返回同一个字节对象就不会。
+  static Future<Uint8List?> cachedMemeBytes(Meme meme) async {
+    if (!meme.fromUser) return memeBytes(meme);
+    final cached = _memeBytesCache[meme.file];
+    if (cached != null) return cached;
+    final bytes = await memeBytes(meme);
+    if (bytes != null && bytes.isNotEmpty) _memeBytesCache[meme.file] = bytes;
+    return bytes;
+  }
+
+  static final Map<String, Uint8List> _memeBytesCache = {};
+
+  /// 用户图库变了之后要清一次,否则删了又加的图会拿着旧的字节。
+  static void clearMemeBytesCache() => _memeBytesCache.clear();
 
   /// 取一张已保存的图。不存在返回 null。
   /// 取磁盘上的一张图。取不到就返回 null。

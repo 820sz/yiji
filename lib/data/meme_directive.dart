@@ -27,12 +27,49 @@ class MemeDirective {
 /// 指令行的开头。用它找"是否已经开始输出指令"。
 const _marker = '[表情';
 
+/// 模型**抄回来的**那几种写法,也算"要一张图"。
+///
+/// 模型不总是老实写 `[表情: ...]`。它会照着上下文里见过的样子写:
+/// 历史里"他发的图"是用下面这种方括号形式描述给它的,于是它想发图时就
+/// 照着写一行 `[我发的图: <描述>]`,然后等着图出现——而那是正文,不是指令,
+/// 结果就是**用户什么图都没收到,只看到一行方括号文字**。
+///
+/// 所以这些写法一律按"要这张图"处理:描述就是里面的那句,和 `[表情: ...]`
+/// 走同一条挑图链路。用户报的"AI 发表情包还是有毛病"就是这一条。
+const _echoPrefixes = ['[我发的图', '[他发的图'];
+
+/// 找指令标记的位置。返回 -1 表示这轮回复没有要图。
+int _directiveIndex(String raw) {
+  var best = -1;
+  void consider(int index) {
+    if (index >= 0 && (best < 0 || index < best)) best = index;
+  }
+
+  consider(raw.indexOf(_marker));
+  for (final prefix in _echoPrefixes) {
+    var from = 0;
+    while (from <= raw.length) {
+      final index = raw.indexOf(prefix, from);
+      if (index < 0) break;
+      final after = index + prefix.length;
+      // 只有紧跟着冒号的才算(`[我发的图: …]`),免得把正文里提到这几个字
+      // 也当成指令。
+      if (after < raw.length && (raw[after] == ':' || raw[after] == '：')) {
+        consider(index);
+        break;
+      }
+      from = index + 1;
+    }
+  }
+  return best;
+}
+
 /// 解析 [raw]。
 ///
 /// 返回的 [MemeDirective.text] 已经去掉完整的指令行;如果只收到半个标记,
 /// 则把标记起始位置之后的内容全部裁掉(因为那部分还没法判断是正文还是指令)。
 MemeDirective stripMemeDirective(String raw) {
-  final start = raw.indexOf(_marker);
+  final start = _directiveIndex(raw);
   if (start < 0) return MemeDirective(text: raw);
 
   final head = raw.substring(0, start);

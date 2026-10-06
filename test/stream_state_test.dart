@@ -56,6 +56,38 @@ void main() {
     // 每次分片都要推进 tick,正在长的那块才会重绘。
     expect(tickCounts.toSet().length, received.length, reason: 'tick 应当逐个递增');
   });
+
+  test('落库期间"正在生成"的那一份不能先消失', () async {
+    // 用户报的"ai 说完之后回复吐出来时闪一下"。
+    //
+    // 以前 commitAssistantMessage 一进函数就把流式正文清掉,而挑图、读字节、
+    // 写库全是异步的——从清掉到正式消息进列表之间那几百毫秒里,这条回答
+    // **整个不在屏幕上**,然后才蹦出来。现在正文要留到落库完成再收。
+    SharedPreferences.setMockInitialValues({'ai_api_key': 'sk-test'});
+    final state = AppState(
+      store: FakeStore(),
+      reports: ReportService(FakeStore()),
+      settings: await SettingsStore.load(),
+      aiClient: AiClient(httpClient: _ChunkedAi()),
+    );
+    await state.bootstrap();
+
+    await for (final _ in state.sendChat('讲个故事')) {}
+    expect(state.streaming, isTrue, reason: '分片收完了,但还没落库');
+
+    final committing = state.commitAssistantMessage();
+    // 还没 await:这一刻它刚进函数,正文必须还在屏幕上。
+    expect(
+      state.streaming,
+      isTrue,
+      reason: '清得太早,这条回答会先消失几百毫秒再蹦出来(闪)',
+    );
+    expect(state.streamingAnswer, isNotEmpty);
+
+    await committing;
+    expect(state.streaming, isFalse, reason: '落库完了才收掉流式那一份');
+    expect(state.chat.last.content, contains('从前'));
+  });
 }
 
 /// 分帧吐字的假客户端。

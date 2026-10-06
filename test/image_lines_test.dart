@@ -120,7 +120,7 @@ void main() {
       final stored = '确实惨。\n\n![图] data:image/png;base64,${base64Encode(bytes)}';
       final projected = projectForModel(stored, isUser: false);
       expect(projected, contains('确实惨。'));
-      expect(projected, contains('[我发的图]'));
+      expect(projected, contains('（你上一轮回了一张图）'));
       expect(projected.contains('data:image'), isFalse, reason: '几十 KB 的 base64 会挤爆上下文');
       expect(projected.contains('![图]'), isFalse, reason: '模型照这个格式模仿,就是那个 bug');
     });
@@ -128,8 +128,14 @@ void main() {
     test('用户发的表情包,描述要留给模型', () {
       const stored = '哈哈哈\n![图] asset:memes/$victimFile | 瘫成一团趴在鲸鱼抱枕上，眼都睁不开';
       final projected = projectForModel(stored, isUser: true);
-      expect(projected, contains('[他发的图:瘫成一团趴在鲸鱼抱枕上，眼都睁不开]'));
+      expect(projected, contains('（他发了一张图:瘫成一团趴在鲸鱼抱枕上，眼都睁不开）'));
       expect(projected.contains('asset:'), isFalse);
+      // 用括号陈述而不是方括号:方括号那种写法模型会当成"发图的方式"照抄。
+      expect(
+        projected.contains('[我发的图'),
+        isFalse,
+        reason: '方括号会被模型照抄成一行文字,用户什么都收不到',
+      );
     });
 
     test('没有图的消息原样返回', () {

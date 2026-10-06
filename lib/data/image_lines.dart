@@ -83,10 +83,14 @@ Future<String> normalizeImageLines(String text, {MemeLibrary? library}) async {
 ///   这些字符有什么意义;
 /// - **`![图] ...` 这个格式本身**:提示词里用它举过一次例,模型会照着模仿,
 ///   把它想要的那张图也写成一行——而那一行里的东西并不是路径,渲染层只认引用,
-///   最后就显示成「图不在了」。给模型的版本改成纯文字,这个模仿就没有了对象。
+///   最后就显示成「图不在了」。给模型的版本改成一句陈述,这个模仿就没有了对象。
+///
+/// 用**括号陈述**而不是方括号:`[我发的图: xxx]` 那种写法模型会当成"发图的方式"
+/// 照抄下来,而它照抄的结果只是一行文字,用户什么都收不到。括号读起来是旁白,
+/// 不会被当成动作。(万一它还是照抄了,解析层也认——见 `stripMemeDirective`。)
 String projectForModel(String stored, {required bool isUser}) {
   if (!stored.contains(ChatImage.marker)) return stored;
-  final who = isUser ? '他发的图' : '我发的图';
+  final who = isUser ? '他发了一张图' : '你上一轮回了一张图';
   final lines = <String>[];
   for (final line in stored.split('\n')) {
     if (ChatImage.parse(line) == null) {
@@ -94,7 +98,7 @@ String projectForModel(String stored, {required bool isUser}) {
       continue;
     }
     final caption = ChatImage.captionOf(line);
-    lines.add(caption.isEmpty ? '[$who]' : '[$who:$caption]');
+    lines.add(caption.isEmpty ? '（$who）' : '（$who:$caption）');
   }
   return lines.join('\n').trim();
 }

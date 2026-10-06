@@ -454,9 +454,18 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
+  /// 这一帧是否已经排过一次"贴底"。
+  ///
+  /// 流式回答一秒能到十几个分片,每个分片都排一次的话,同一帧里会连着一串
+  /// `jumpTo`——列表被反复重新定位,看起来就是抖。合并成每帧一次。
+  bool _bottomPending = false;
+
   void _scrollToBottom({bool animate = false}) {
+    if (!animate && _bottomPending) return;
+    _bottomPending = true;
     // 列表长度在下一帧才更新,post-frame 里滚动才能到底。
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      _bottomPending = false;
       if (!_scroll.hasClients) return;
       final target = _scroll.position.maxScrollExtent;
       if (animate) {
@@ -1469,6 +1478,14 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
   /// 那会把他正在读的东西抽走。所以只自动收起"他没碰过"的那种。
   bool _userToggled = false;
 
+  /// 这一次收起是**自动**的(思考结束),不做尺寸动画。
+  ///
+  /// 自动收起正好发生在回答开始往外吐的那一刻:那 140 毫秒里列表一边被压缩、
+  /// 一边在长文字,还叠着贴底滚动——用户看到的就是"回复吐出来的时候掉帧、闪"。
+  /// 一帧收完反而干净。用户自己点开/收起仍然带动画:那是一次单独的动作,
+  /// 没有别的东西同时在动。
+  bool _instantCollapse = false;
+
   /// 思考区内部滚动用的控制器。
   ///
   /// **必须显式持有**:Scrollbar 要求关联的 controller 上只挂一个
@@ -1521,7 +1538,10 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
     super.didUpdateWidget(oldWidget);
     // 思考结束(生成中 → 完成)时自动收起。
     if (oldWidget.live && !widget.live && !_userToggled) {
-      setState(() => _expanded = false);
+      setState(() {
+        _expanded = false;
+        _instantCollapse = true;
+      });
     }
     // 流式追加时自己滚到底,让用户看到最新的想法。
     // (以前靠 `reverse: true` 实现,但那会让展开瞬间的内容位置很怪。)
@@ -1559,6 +1579,8 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
           // 它到底在纠结什么也没办法。
           onTap: () => setState(() {
             _userToggled = true;
+            // 用户自己动手了就恢复动画:那是一次单独的动作。
+            _instantCollapse = false;
             _expanded = !_expanded;
           }),
           child: Padding(
@@ -1599,7 +1621,7 @@ class _ReasoningPanelState extends State<ReasoningPanel> {
                   ],
                 ),
                 AnimatedSize(
-                  duration: AppTheme.fast,
+                  duration: _instantCollapse ? Duration.zero : AppTheme.fast,
                   curve: AppTheme.easeOut,
                   alignment: Alignment.topLeft,
                   child: _expanded

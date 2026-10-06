@@ -165,7 +165,9 @@ void main() {
       final sent = ai.lastSentText();
       expect(sent.contains('![图]'), isFalse, reason: '模型照这个格式模仿就是那个 bug');
       expect(sent.contains('data:image'), isFalse, reason: '几十 KB 的 base64 不该进上下文');
-      expect(sent, contains('[我发的图'));
+      // 也不能改成方括号那种写法:模型会当成"发图的方式"照抄成一行文字。
+      expect(sent.contains('[我发的图'), isFalse);
+      expect(sent, contains('（你上一轮回了一张图'));
     });
 
     testWidgets('发图规则只在有图库时才发给模型', (tester) async {

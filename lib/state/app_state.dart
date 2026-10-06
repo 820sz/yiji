@@ -256,6 +256,16 @@ class AppState extends ChangeNotifier {
     notifyListeners();
   }
 
+  /// 用户加/删了自己的表情包之后刷新 AI 那一份。
+  ///
+  /// 提示词里那份候选清单是启动时准备好的**另一份拷贝**,和图库缓存不是一回事。
+  /// 不刷新的话,新加的图这一整个会话都进不了模型的候选——用户加完图、
+  /// 让 AI 用一下,AI 却说"我库里没有这张",他会以为这个功能是假的。
+  Future<void> refreshMemeCatalog() async {
+    MemeLibrary.invalidate();
+    await _prepareMemeCatalog();
+  }
+
   Future<void> bootstrap() async {
     await _loadDay();
     // 待同步角标要在启动时就算出来。以前它只在增删改之后刷新,
@@ -1496,6 +1506,10 @@ class AppState extends ChangeNotifier {
                 isImage: true,
                 imageBytes: current.imageBytes,
                 imageRef: saved,
+                // **描述要跟着走。** 用户自添加的表情包走的就是这条路
+                // (它有字节、还没有引用),漏掉的话消息里只剩一个文件名,
+                // 模型就丢了"这张图是什么情绪"这条线索。
+                memeCaption: current.memeCaption,
                 sizeBytes: current.sizeBytes,
               ),
       );
@@ -1670,13 +1684,17 @@ class AppState extends ChangeNotifier {
     final reasoning = _streamingReasoning.trim();
     final startedAt = _reasoningStartedAt;
     _reasoningStartedAt = null;
-    _streamingAnswer = '';
-    _streamingReasoning = '';
-    streamTick.value++;
     // 写回**发起时那个**会话,而不是当前选中的那个:生成期间用户可能已经
     // 翻到别的对话去了。
     final target = _streamingConversationId;
     _streamingConversationId = 0;
+
+    // **注意这里先不动 `_streamingAnswer`。**
+    //
+    // 挑图、读字节、写库这几步都是异步的。以前在开头就把流式正文清掉,
+    // 于是从"清掉"到"正式消息进列表"之间那几百毫秒里,**这条回答整个消失**,
+    // 然后才蹦出来——用户看到的就是"回复吐出来的时候闪一下"。
+    // 现在让流式那一份一直显示到正式消息落库,再一次性换过去(见 [_finishStreaming])。
 
     // 模型可能要求了一张表情包。挑图在这里做:挑到了就把它作为一行
     // `![图] <自包含引用>` 追加到正文后面,回看历史时能直接渲染出来。
@@ -1706,6 +1724,7 @@ class AppState extends ChangeNotifier {
     }
 
     if (answer.isEmpty || target == 0) {
+      _finishStreaming(raw);
       notifyListeners();
       return;
     }
@@ -1720,7 +1739,24 @@ class AppState extends ChangeNotifier {
     }
     // 还没起名的会话用首条用户消息当标题——侧边栏里一堆"新对话"没法分辨。
     await _autoTitleConversation(target);
+    // 收掉流式那一份,**紧接着**刷新列表:这次刷新会把"流式气泡"和"正式消息"
+    // 在同一帧里换过来,中间不空、也不重。
+    _finishStreaming(raw);
     await loadConversations();
+  }
+
+  /// 收掉"正在生成"的那一份(正文与思考)。
+  ///
+  /// [raw] 是刚落库的那段正文;**对不上就说明期间又开了新的一轮**,
+  /// 那这一份不属于我们,不能动——否则会把新一轮刚吐出来的字抹掉。
+  ///
+  /// 这里**不碰 `streamTick`**:下一次重建由 [loadConversations] 里的
+  /// `notifyListeners` 带来,那样流式气泡和正式消息才会在同一帧里替换。
+  /// 自己先惊动一次的话,那一帧会渲染出一个空的气泡——又闪一下。
+  void _finishStreaming(String raw) {
+    if (_streamingAnswer.trim() != raw) return;
+    _streamingAnswer = '';
+    _streamingReasoning = '';
   }
 
   /// 按模型给的情绪和画面描述挑一张表情包。
