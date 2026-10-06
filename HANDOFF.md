@@ -2,7 +2,7 @@
 
 > 写给下一个接手的人(或下一个会话的 agent)。
 > **这份文件是唯一现状源。** 里面每一条都标注了"怎么确认",不要凭叙述推断。
-> 最后更新:2026-10-07,版本 **1.1.10+22**,HEAD `2d3341b`。
+> 最后更新:2026-10-07,版本 **1.1.11+23**,HEAD `37c3dbd`。
 
 ---
 
@@ -45,8 +45,8 @@
 | 仓库 | https://github.com/820sz/yiji(**公开**,默认分支 `master`) |
 | 包名 | `com.xi283.yiji`,应用名「忆记」 |
 | 技术栈 | Flutter 3.44.7 / Dart 3.12.2;SQLite(sqflite)schema **v6**;shared_preferences |
-| 当前版本 | `1.1.10+22`(`pubspec.yaml`) |
-| 最新发布 | tag `v22`(1.1.10);上一个 `v21`(1.1.9) |
+| 版本 | `1.1.11+23`(`pubspec.yaml`) |
+| 最新发布 | tag `v23`(1.1.11);上两个 `v22`(1.1.10)、`v21`(1.1.9) |
 | 构建 | `$env:JAVA_HOME='C:\Program Files\Android\Android Studio\jbr'; flutter build apk --release` |
 | AI | DeepSeek(OpenAI 兼容):`https://api.deepseek.com/chat/completions`;模型 `deepseek-flash` / `deepseek-v4-pro` / `deepseek-v4-flash` |
 | API key | 在 gitignored 的 `.env` 里(第 9 行 `DEEPSEEK_API_KEY=`);`gh auth token` 可用(发布要用) |
@@ -71,7 +71,7 @@ cd tool\sqltest; flutter test; cd ..\..   # 数据层(真实 SQLite,另一个 pu
 ```
 
 **当前基线(2026-10-07,已确认)**:`flutter analyze` 无问题;
-顶层 **295 条通过 / 8 条跳过**(跳过的是需要真实 API 的,设计如此);
+顶层 **305 条通过 / 8 条跳过**(跳过的是需要真实 API 的,设计如此);
 数据层 **78 条通过**。
 
 真实 API 测试默认跳过,手动开(会花钱):
